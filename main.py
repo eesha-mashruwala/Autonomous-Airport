@@ -490,6 +490,128 @@ class FlightDynamics:
         return {"stopped": True, "t_stop": t, "x_stop": x}
 
 
+# ------ GROUND OPERATION CLASSES --------------------------------------------------------------
+class GroundOperations:
+
+    def __init__(self, runway_length: float, num_gates: int, runway_slope: float = 0.0):
+        """
+        Initialise ground operations system.
+
+        Parameters
+        ----------
+        runway_length : float
+            Length of the runway in meters.
+        num_gates : int
+            Total number of aircraft gates available at the airport.
+        runway_slope : float
+            Runway slope angle (theta) in radians.
+        """
+        self.runway_length = runway_length
+        self.runway_slope = runway_slope
+
+        # gates: None if empty, or plane object assigned
+        self.gates = 19
+
+        # state flags
+        self.runway_busy = False  
+        self.runway_free_time = 0.0  # when the runway becomes free
+
+        # queues
+        self.takeoff_queue = []
+        self.landing_queue = []
+        self.taxiing_planes = []
+
+# ------ RUNWAY LOGIC --------------------------------------------------------------
+    def request_takeoff_slot(self, plane):
+        """
+        Add a plane to the takeoff queue.
+        """
+        self.takeoff_queue.append(plane)
+
+    def request_landing_slot(self, plane):
+        """
+        Add a plane to the landing queue.
+        """
+        self.landing_queue.append(plane)
+
+    def is_runway_available(self, current_time: float) -> bool:
+        """
+        Check if the runway is currently free for use.
+        """
+        return (not self.runway_busy) or (current_time >= self.runway_free_time)
+
+    def mark_runway_busy(self, duration: float, current_time: float):
+        """
+        Mark the runway as occupied for a given duration.
+        """
+        self.runway_busy = True
+        self.runway_free_time = current_time + duration
+
+    def release_runway(self):
+        """
+        Immediately free the runway (used for forced overrides).
+        """
+        self.runway_busy = False
+
+
+    # ------ GATE LOGIC --------------------------------------------------------------
+    def allocate_gate(self, plane):
+        """
+        Assign a plane to the first available gate.
+        Returns the gate index, or None if full.
+        """
+        for i, gate in enumerate(self.gates):
+            if gate is None:
+                self.gates[i] = plane
+                return i
+        return None  # no available gates
+
+    def release_gate(self, gate_index: int):
+        """
+        Free the given gate.
+        """
+        if 0 <= gate_index < len(self.gates):
+            self.gates[gate_index] = None
+
+
+# ------ TAXI LOGIC --------------------------------------------------------------
+    def taxi_plane(self, plane, duration: float):
+        """
+        Add a plane to the taxiing list with a placeholder taxi duration.
+        No full logic yet.
+        """
+        self.taxiing_planes.append({
+            "plane": plane,
+            "time_remaining": duration
+        })
+
+    def update_taxiing(self, dt: float):
+        """
+        Update taxi timers; remove planes when taxi completes.
+        """
+        for entry in list(self.taxiing_planes):
+            entry["time_remaining"] -= dt
+            if entry["time_remaining"] <= 0:
+                self.taxiing_planes.remove(entry)
+
+# ------ FULL AIRPORT UPDATE LOOP --------------------------------------------------------------
+    def update(self, current_time: float, dt: float):
+        """
+        Airport update loop.
+        This will eventually handle scheduling.
+        For now: minimal functionality.
+        """
+        # update taxi timers
+        self.update_taxiing(dt)
+
+        # free runway if its time
+        if self.runway_busy and current_time >= self.runway_free_time:
+            self.runway_busy = False
+
+        # NOTE:
+        # Takeoff/landing queue logic will be implemented later.
+        pass
+
 # ------ GLOBAL FUNCTIONS --------------------------------------------------------------
 # if the global functions can be moved into appropriate classes, or a new one (for encapsualtion purposes) this should be done
 
