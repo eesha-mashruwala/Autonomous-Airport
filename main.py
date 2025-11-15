@@ -1,3 +1,5 @@
+import numpy as np
+import math
 """
 Airport Flight Dynamics Module
 
@@ -125,35 +127,110 @@ class Plane:
         """Get ambient air density used by the plane."""
         return self._rho
 
-    # ------------------ aerodynamic helpers ---------------------------------
+    # ------------------ AERODYNAMIC HELPERS ---------------------------------
+    # ------------------------ Aspect Ratio ----------------------------------
     def aspect_ratio(self):
-        """Compute wing aspect ratio AR = b^2 / S."""
-        return (self._b ** 2) / self._S
+            """Compute wing aspect ratio AR = b^2 / S."""
+            return (self._b ** 2) / self._S
 
-    def lift(self, V: float, CL: float):
-        """Compute lift force (N) at speed V and lift coefficient CL."""
-        return 0.5 * self._rho * V ** 2 * self._S * CL
-
-    def drag_coefficient(self, CL: float):
-        """Compute drag coefficient CD from CL using a simple polar.
-        CD = CD0 + (CL^2) / (pi * AR * e)
+    # ------------------------ Thrust model ----------------------------------
+    def compute_thrust(self, V):
         """
-        
-        AR = self.aspect_ratio()
-        return self._CD0 + (CL ** 2) / (np.pi * AR * self._e)
+        T(V)= T_0 * (1- C_t*V)
+        Thrust model used in:
+        -- ground_roll_takeoff()
+        -- climb_phase()
+        -- holding_phase()
+        -- final_approach()
+        This thrust model is used in EVERY stage of flight EXCEPT ground_roll_landing()
 
-    def drag(self, V: float, CL: float):
-        """Compute drag force at speed V using CL to estimate induced drag."""
-        CD = self.drag_coefficient(CL)
-        return 0.5 * self._rho * V ** 2 * self._S * CD
+        """
+        return max(0.0, self._T0 * (1.0 - self._Ct * V))
 
+    # ------------------------ Aerodynamic Drag model ----------------------------------
+    def compute_drag(self, V, gamma=0.0, phi=0.0):
+        """
+        D = 1/2*ρ*V^2*S*C_D
+        Aerodynamic Drag used in:
+        -- ground_roll_takeoff()
+        -- climb_phase()
+        -- holding_phase()
+        -- final_approach()
+        -- ground_roll_landing()
+        This model is used in EVERY stage of flight
+
+        """
+        CD = self.compute_drag_coeff(V, gamma, phi)
+        return 0.5 * self._rho * V**2 * self._S * CD
+
+
+    def compute_drag_coeff(self, V, gamma=0.0, phi=0.0):
+        """
+        C_D = C_D0+(S*C_L^2)/(π*b^2*e)
+        Aerodynamic Drag Coefficient(C_D) used in the Aerodynamic Drag model from compute_drag():
+        To see which functions it is used see : compute_drag()
+
+        """
+        CL = self.compute_lift(V, gamma, phi)
+        induced = (CL**2) / (math.pi * self._AR * self._e)
+        return self._CD0 + induced
+
+
+    def compute_lift(self, V, gamma=0.0, phi=0.0):
+        """
+        C_L^2 = (4m^2*g^2*(cos⁡)^2*γ)/(ρ^2*V^4*S^2*(cos⁡)^2*ϕ) - note we calc and return C_L here
+        Lift (C_L) used in the Aerodynamic Drag Coefficient model from compute_drag_coeff():
+        To see which functions it is used see : compute_drag_coeff()
+
+        """
+        num = 2 * self._mass * 9.81 * math.cos(gamma) * math.cos(phi)
+        den = self._rho * V**2 * self._S
+        return num / den
+
+    # ------------------------ Rolling Friction -------------------------
+    def compute_rolling_friction(self, V):
+        """
+        F_rr = μ_rr*(mg - F_L)
+        Aerodynamic Drag used in:
+        -- ground_roll_takeoff()
+        -- ground_roll_landing()
+
+        """
+        L = self.compute_aerodynamic_lift(V)
+        return self._mu_rr * (self._mass * 9.81 - L)
+
+    # ------------------------ Aerodynamic lift ----------------------------------
+    def compute_aerodynamic_lift(self, V, gamma=0.0, phi=0.0):
+        """
+        F_L= 1/2*ρ*V^2*S*C_L
+        Aerodynamic Lift (F_L) used in the Rolling Friction model from compute_rolling_friction():
+        To see which functions it is used see : compute_rolling_friction()
+
+        """
+        CL = self.compute_lift(V, gamma, phi)
+        return 0.5 * self._rho * V**2 * self._S * CL
+
+    # ------------------------ Braking Force ----------------------------------
+    def compute_braking_force():
+        """
+        F_brake (t)= β * μ_b * mg
+        Braking Force(F_brake) used in the Ground Roll stage of flight - see ground_roll_landing()
+
+        """
+
+        beta = 1.0  # full brakes
+        # fill in eqn
+        return F_brake
+
+    # ------------------------ Stall Speed ----------------------------------
     def stall_speed(self):
-        """Return a simple estimate of stall speed V_stall (m/s) using CL_max.
+        """Return an estimate of stall speed V_stall (m/s) using CL_max.
 
         V_stall = sqrt(2*m*g / (rho * S * CL_max))
         """
-        g = 9.80665
+
         return np.sqrt((2.0 * self._mass * g) / (self._rho * self._S * self._CL_max))
+
 
 
 # ------ PLANE SUBCLASSES --------------------------------------------------------------
@@ -163,7 +240,7 @@ class AirbusA220(Plane):
         Inheriting from Plane class         """
 
     def __init__(self, identifier: str = 'AirbusA220'):
-        super().__init__(identifier=identifier, mass=60000.0, S=124.0, b=35.8,
+        super().__init__(identifier=identifier, mass=70900.0, S=112.3, b=35.1,
                          CL_max=1.6, CD0=0.02, e=0.8)
         self.plane_type = 'AirbusA220'
 
@@ -173,7 +250,7 @@ class EmbraerE170(Plane):
         Inheriting from Plane class         """
 
     def __init__(self, identifier: str = 'EmbraerE170'):
-        super().__init__(identifier=identifier, mass=68000.0, S=122.6, b=34.1,
+        super().__init__(identifier=identifier, mass=37200.0, S=72.72, b=28.65,
                          CL_max=1.5, CD0=0.019, e=0.82)
         self.plane_type = 'EmbraerE170'
 
@@ -183,7 +260,7 @@ class Dash8_400(Plane):
         Inheriting from Plane class         """
 
     def __init__(self, identifier: str = 'Dash8_400'):
-        super().__init__(identifier=identifier, mass=68000.0, S=122.6, b=34.1,
+        super().__init__(identifier=identifier, mass=29574.0, S=63.1, b=28.42,
                          CL_max=1.5, CD0=0.019, e=0.82)
         self.plane_type = 'Dash8_400'
 
@@ -193,7 +270,7 @@ class ATR72_600(Plane):
         Inheriting from Plane class         """
 
     def __init__(self, identifier: str = 'ATR72_600'):
-        super().__init__(identifier=identifier, mass=68000.0, S=122.6, b=34.1,
+        super().__init__(identifier=identifier, mass=22800.0, S=61.0, b=27.05,
                          CL_max=1.5, CD0=0.019, e=0.82)
         self.plane_type = 'ATR72_600'
 
@@ -201,17 +278,14 @@ class ATR72_600(Plane):
 
 class FlightDynamics:
     """
-    Flight dynamics class that implements phase solvers for a single Plane on a
-    single runway: ground roll (takeoff), climb, cruise, approach and landing
-    roll. This class collects telemetry and provides configurable parameters.
+    Flight dynamics class that implements ode's for each instance of the plane class at every time step
+    This class collects telemetry and provides configurable parameters.
 
-    Important: this class is phase-focused and intentionally separates
-    aircraft properties (Plane) from dynamic integration logic.
     """
 
     def __init__(self, plane: Plane):
         """
-        Initialize FlightDynamics attached to a Plane.
+        Initialise FlightDynamics attached to a Plane.
 
         Parameters
         ----------
@@ -231,312 +305,189 @@ class FlightDynamics:
         # Runway slope angle (radians)
         self._theta = 0.0
 
-        # landing gear height used for touchdown detection
-        self._h_LG = 1.5
 
-    # -------------------- Telemetry management -------------------------------
-    def _record(self, t: float, x: float, y: float, z: float, V: float,
-                phase: str, extra: Optional[Dict] = None):
+    # -------------------- Co-orindate/Telemetry management -------------------------------
+    def _record(self):
         """
-        Record a telemetry point with standardized fields.
-
-        Parameters
-        ----------
-        t, x, y, z, V : float
-            Time (s), positions (m) and speed (m/s).
-        phase : str
-            Name of the flight phase.
-        extra : dict, optional
-            Additional fields to attach.
+        Record the current simulation state (forces, kinematics, controls)
+        and store it in the telemetry buffer.
         """
         entry = {
-            'time': float(t),
-            'x': float(x),
-            'y': float(y),
-            'z': float(z),
-            'V': float(V),
-            'phase': phase,
-            'plane_id': self._plane.id,
-            'plane_type': self._plane.plane_type,
-            'gate': self._plane.gate,
+            "time": self.t,
+            "x": self.x,
+            "y": self.y,
+            "z": self.z,
+            "V": self.V,
+            "gamma": self.gamma,
+            "psi": self.psi,
+            "phi": self.phi,
+            "thrust": self.T,
+            "drag": self.D,
+            "lift": self.L,
+            "rolling_friction": self.F_rr,
+            "brake_force": self.F_brake,
+            "throttle": self.throttle_cmd,
+            "brake_cmd": self.brake_cmd,
         }
-        if extra:
-            entry.update(extra)
+
         self._telemetry.append(entry)
 
+
     def telemetry(self) -> List[Dict]:
-        """Return collected telemetry as a list of dicts."""
+        """
+        Return collected telemetry entries as a list of dicts.
+        Each entry contains forces, states, and control inputs.
+        """
         return list(self._telemetry)
 
-    # ------------------------ Thrust model ----------------------------------
-    def thrust(self, V: float, t: float) -> float:
+
+    # ------------------------ Velocity/ True Airspeed -------------------------
+    def compute_airspeed(self, V, gamma, thrust):
         """
-        Simple thrust model T(V,t) = T0 * (1 - Ct * V). Ensures non-negative
-        thrust; subclasses or user code can override _T0/_Ct to tune behaviour.
+        m * dV/dt = T - D - mgsin⁡γ
+        True Airspeed used in:
+        -- climb_phase()
+        -- holding_phase()
+        -- final_approach()
 
-        Parameters
-        ----------
-        V : float
-            Speed (m/s).
-        t : float
-            Time (s).
-
-        Returns
-        -------
-        float
-            Thrust along runway/flight axis (N).
         """
-        return max(0.0, self._T0 * (1.0 - self._Ct * V))
+        D = self.plane.compute_drag(V, gamma)
+        return (thrust - D - self.plane.mass * 9.81 * math.sin(gamma)) / self.plane.mass
 
+
+    # ------------------------ Heading Rate -------------------------
+    def compute_heading_rate(self, V, phi):
+        """
+        dψ/dt=g/V tan⁡ϕ
+        Heading Rate used in:
+        -- climb_phase()
+        -- holding_phase()
+        -- final_approach()
+
+        """
+        return 9.81 / V * math.tan(phi)
+
+    
     # ------------------------ Ground roll (takeoff) -------------------------
-    def run_ground_roll_takeoff(self, V0: float = 0.0, x0: float = 0.0,
-                                t_span: Tuple[float, float] = (0.0, 60.0),
-                                V_rot: Optional[float] = None,
-                                t_eval: Optional[np.ndarray] = None) -> Dict:
+    def ground_roll_takeoff(self, dt=0.1, Vr=70):
         """
         Simulate ground roll (1D along runway) using Newton's 2nd law.
+        m * dV/dt = T - D - F_rr - mgsin⁡θ
 
-        The ODE state is [x, V] where dx/dt = V and m dV/dt = T(V,t) - FD(V) -
-        Frr(V) - m g sin(theta). The lift and drag depend on a quasi-steady
-        CL computed from weight and speed.
-
-        Parameters
-        ----------
-        V0 : float
-            Initial ground speed (m/s).
-        x0 : float
-            Initial runway position (m).
-        t_span : (t0, tf)
-            Time integration span.
-        V_rot : float or None
-            Rotation speed threshold (m/s). If None, computed as 1.05*V_stall.
-        t_eval : ndarray or None
-            Times to sample the solution.
-
-        Returns
-        -------
-        dict
-            A summary dict containing the solver result and rotation event info.
         """
-        m = self._plane.mass
+        # integrate until V reaches rotation speed Vr
+        V = 0.0
+        x = 0.0
 
-        # compute stall and rotation speeds
-        Vs = self._plane.stall_speed()
-        if V_rot is None:
-            V_rot = 1.05 * Vs
+        while V < Vr:
+            T = self.plane.compute_thrust(V)
+            D = self.plane.compute_drag(V)
+            L = self.plane.compute_aerodynamic_lift(V)
+            F_rr = self.plane.compute_rolling_friction(L)
 
-        # ODE system
-        def f(t, s):
-            x, V = s
-            # avoid zero-inversion: enforce minimum V when computing CL
-            V_for_CL = max(V, 0.1)
-            # estimate CL required to support weight component normal to flight
-            W = m * 9.80665
-            CL = (2.0 * W) / (self._plane.rho * V_for_CL ** 2 * self._plane.wing_area)
-            # aerodynamic forces
-            FD = self._plane.drag(V_for_CL, CL)
-            FL = self._plane.lift(V_for_CL, CL)
-            Frr = self._mu_rr * (W - FL)
-            T = self.thrust(V, t)
-            dVdt = (T - FD - Frr - W * np.sin(self._theta)) / m
-            dxdt = V
-            return [dxdt, dVdt]
+            a = (T - D - F_rr - self.plane.m * 9.81 * math.sin(self.theta)) / self.plane.m
+            
+            V += a * dt
+            x += V * dt
 
-        # event to detect rotation speed
-        def evt_rot(t, s):
-            return s[1] - V_rot
-
-        evt_rot.terminal = True
-        evt_rot.direction = 1
-
-        if t_eval is None:
-            t_eval = np.linspace(t_span[0], t_span[1], 600)
-
-        sol = solve_ivp(f, t_span, [x0, V0], events=[evt_rot], t_eval=t_eval, max_step=0.5)
-
-        # record telemetry for the ground run
-        for ti, xi, Vi in zip(sol.t, sol.y[0], sol.y[1]):
-            self._record(ti, xi, 0.0, 0.0, Vi, 'ground_roll')
-
-        rotation_reached = len(sol.t_events[0]) > 0
-        t_rot = float(sol.t_events[0][0]) if rotation_reached else None
-        x_rot = float(np.interp(t_rot, sol.t, sol.y[0])) if rotation_reached else None
-        V_rot_actual = float(np.interp(t_rot, sol.t, sol.y[1])) if rotation_reached else None
-
-        return {
-            'solution': sol,
-            'rotation_reached': rotation_reached,
-            't_rot': t_rot,
-            'x_rot': x_rot,
-            'V_rot': V_rot_actual,
-            'V_stall': Vs,
-            'V_rot_threshold': V_rot,
-        }
+        return {"V_rot": V, "distance": x}
 
     # ------------------------------ Climb ----------------------------------
-    def run_climb(self, state0: Tuple[float, float, float, float],
-                  t_span: Tuple[float, float], t_eval: Optional[np.ndarray] = None,
-                  gamma0: float = 5.0 * np.pi / 180.0, phi: float = 0.0) -> Dict:
+    def climb_phase(self, t_end=60, dt=0.1):
         """
-        Simulate a simplified climb phase using 2D kinematics and dynamics.
-
-        state0 is (x0, z0, V0, psi0) representing initial position along runway
-        (x), altitude z, speed V, and heading psi. The model integrates
-        [x, z, V, psi] with equations provided earlier.
-
-        Parameters and returns are analogous to other phase methods.
+        Simplified climb phase using 2D kinematics and dynamics.
+        dx/dt = Vcos⁡γcos⁡ψ
+        dy/dt = Vcos⁡γsin⁡ψ
+        dz/dt = -Vsin⁡γ
         """
-        m = self._plane.mass
-        x0, z0, V0, psi0 = state0
 
-        def f(t, s):
-            x, z, V, psi = s
-            V_for_CL = max(V, 0.1)
-            CL = (2.0 * m * 9.80665 * np.cos(gamma0)) / (self._plane.rho * V_for_CL ** 2 * self._plane.wing_area)
-            D = self._plane.drag(V_for_CL, CL)
-            T = self.thrust(V, t)
-            dVdt = (T - D - m * 9.80665 * np.sin(gamma0)) / m
-            dxdt = V * np.cos(gamma0) * np.cos(psi)
-            dzdt = V * np.sin(gamma0)
-            dpsidt = 9.80665 * np.tan(phi) / max(V, 1e-3)
-            return [dxdt, dzdt, dVdt, dpsidt]
+        x = y = z = 0
+        t = 0
 
-        if t_eval is None:
-            t_eval = np.linspace(t_span[0], t_span[1], 400)
+        while t < t_end:
+            T = self.plane.compute_thrust(self.V)
+            D = self.plane.compute_drag(self.V)
+            
+            dVdt = (T - D - self.plane.m * 9.81 * math.sin(self.gamma)) / self.plane.m
+            self.V += dVdt * dt
 
-        sol = solve_ivp(f, t_span, [x0, z0, V0, psi0], t_eval=t_eval, max_step=1.0)
+            x += self.V * math.cos(self.gamma) * math.cos(self.psi) * dt
+            y += self.V * math.cos(self.gamma) * math.sin(self.psi) * dt
+            z += -self.V * math.sin(self.gamma) * dt
 
-        # record telemetry for climb
-        for ti, xi, zi, Vi in zip(sol.t, sol.y[0], sol.y[1], sol.y[2]):
-            self._record(ti, xi, 0.0, zi, Vi, 'climb')
+            t += dt
 
-        return {'solution': sol}
+        return {"x": x, "y": y, "z": z, "V": self.V}
 
-    # ------------------------------ Cruise ---------------------------------
-    def run_cruise(self, state0: Tuple[float, float, float, float],
-                   t_span: Tuple[float, float], V_cruise: float,
-                   t_eval: Optional[np.ndarray] = None) -> Dict:
+    # ------------------------------ Holding ---------------------------------
+    def holding_phase(self):
         """
-        Simulate a simple cruise where speed tends toward V_cruise and heading
-        is approximately constant.
+        The holding phase is where the plane spawns and flies before moving into the final_approach stage
+        dx/dt=V_holding*cos⁡γ*cos⁡ψ
+        dy/dt=V_holding*cos⁡γ*sin⁡ψ
+        dz/dt=-V_holding*sin⁡γ
+
         """
-        x0, z0, V0, psi0 = state0
+        x = y = z = 0
 
-        def f(t, s):
-            x, z, V, psi = s
-            k = 0.5
-            dVdt = k * (V_cruise - V)
-            gamma = 0.0
-            dxdt = V * np.cos(gamma) * np.cos(psi)
-            dzdt = V * np.sin(gamma)
-            dpsidt = 0.0
-            return [dxdt, dzdt, dVdt, dpsidt]
+        for _ in range(int(t_hold/dt)):
+            x += self.V_hold * cos(self.gamma) * cos(self.psi) * dt
+            y += self.V_hold * cos(self.gamma) * sin(self.psi) * dt
+            z += -self.V_hold * sin(self.gamma) * dt
 
-        if t_eval is None:
-            t_eval = np.linspace(t_span[0], t_span[1], 400)
-
-        sol = solve_ivp(f, t_span, [x0, z0, V0, psi0], t_eval=t_eval, max_step=5.0)
-
-        for ti, xi, zi, Vi in zip(sol.t, sol.y[0], sol.y[1], sol.y[2]):
-            self._record(ti, xi, 0.0, zi, Vi, 'cruise')
-
-        return {'solution': sol}
+        return {"x": x, "y": y, "z": z}
 
     # -------------------------- Approach & Landing ---------------------------
-    def run_approach_and_landing(self, state0: Tuple[float, float, float, float],
-                                 t_span: Tuple[float, float], gamma: float = -5.5 * np.pi / 180.0,
-                                 t_eval: Optional[np.ndarray] = None) -> Dict:
+    def final_approach(self, dt=0.1, t_end=40):
         """
-        Simulate final approach until touchdown event: z == h_LG (approx).
+        Final approach typically maintains a constant flight path angle and uses 
+        the same kinematic and dynamic equations as the climb phase.
+        γ = -5.5 deg (slope used for London City Airport approach)
+        dx/dt = Vcos⁡γcos⁡ψ
+        dy/dt = Vcos⁡γsin⁡ψ
+        dz/dt = -Vsin⁡γ
 
-        Returns touchdown time, position and speed in the summary dict.
         """
-        m = self._plane.mass
-        x0, z0, V0, psi0 = state0
+        gamma = -5.5 * deg
+        x=y=z=0
 
-        def f(t, s):
-            x, z, V, psi = s
-            V_for_CL = max(V, 0.1)
-            CL = (2.0 * m * 9.80665 * np.cos(gamma)) / (self._plane.rho * V_for_CL ** 2 * self._plane.wing_area)
-            D = self._plane.drag(V_for_CL, CL)
-            T = self.thrust(V, t)
-            dVdt = (T - D - m * 9.80665 * np.sin(gamma)) / m
-            dxdt = V * np.cos(gamma) * np.cos(psi)
-            dzdt = V * np.sin(gamma)
-            dpsidt = 0.0
-            return [dxdt, dzdt, dVdt, dpsidt]
+        for _ in range(int(t_end/dt)):
+            T = self.plane.compute_thrust(self.V_idle)
+            D = self.plane.compute_drag(self.V_idle)
 
-        def evt_touchdown(t, s):
-            return s[1] - self._h_LG
+            dVdt = (T - D - self.plane.m*9.81*sin(gamma)) / self.plane.m
+            V += dVdt*dt
 
-        evt_touchdown.terminal = True
-        evt_touchdown.direction = -1
+            x += V*cos(gamma)*cos(self.psi)*dt
+            y += V*cos(gamma)*sin(self.psi)*dt
+            z += -V*sin(gamma)*dt
 
-        if t_eval is None:
-            t_eval = np.linspace(t_span[0], t_span[1], 400)
-
-        sol = solve_ivp(f, t_span, [x0, z0, V0, psi0], events=[evt_touchdown], t_eval=t_eval, max_step=0.5)
-
-        # record approach telemetry
-        for ti, xi, zi, Vi in zip(sol.t, sol.y[0], sol.y[1], sol.y[2]):
-            self._record(ti, xi, 0.0, zi, Vi, 'approach')
-
-        touchdown = len(sol.t_events[0]) > 0
-        t_touch = float(sol.t_events[0][0]) if touchdown else None
-        x_touch = float(np.interp(t_touch, sol.t, sol.y[0])) if touchdown else None
-        V_touch = float(np.interp(t_touch, sol.t, sol.y[2])) if touchdown else None
-
-        return {
-            'solution': sol,
-            'touchdown': touchdown,
-            't_touch': t_touch,
-            'x_touch': x_touch,
-            'V_touch': V_touch,
-        }
+        return {"trajectory": (x,y,z)}
 
     # ------------------------ Ground roll after landing ---------------------
-    def run_ground_roll_landing(self, V0: float, x0: float = 0.0,
-                                t_span: Tuple[float, float] = (0.0, 120.0),
-                                t_eval: Optional[np.ndarray] = None,
-                                beta: float = 1.0, mu_b: float = 0.5) -> Dict:
+    def ground_roll_landing(self, dt=0.1):
         """
-        Simulate the rollout after touchdown using braking and aerodynamic
-        deceleration until stop condition V < V_stop (~0.5 m/s).
+        m * dV/dt = -D - F_rr - F_brake - mgsin⁡θ - T_rev
+
         """
-        m = self._plane.mass
+        V = self.V_touchdown
+        x = 0
+        t = 0
 
-        def f(t, s):
-            x, V = s
-            V_for_CL = max(V, 0.1)
-            CL = (2.0 * m * 9.80665) / (self._plane.rho * V_for_CL ** 2 * self._plane.wing_area)
-            FD = self._plane.drag(V_for_CL, CL)
-            FL = self._plane.lift(V_for_CL, CL)
-            Frr = self._mu_rr * (m * 9.80665 - FL)
-            Fbrake = beta * mu_b * m * 9.80665
-            Trev = 0.0
-            dVdt = (-FD - Frr - Fbrake - m * 9.80665 * np.sin(self._theta) - Trev) / m
-            dxdt = V
-            return [dxdt, dVdt]
+        while V > 0:
+            D = self.plane.compute_drag(V)
+            L = self.plane.compute_aerodynamic_lift(V)
+            F_rr = self.plane.compute_rolling_friction(L)
+            F_brake = self.compute_braking_force()
+            T_rev = self.T_reverse
 
-        def evt_stop(t, s):
-            return s[1] - 0.5
+            a = (-D - F_rr - F_brake - self.plane.m*9.81*sin(self.theta) - T_rev) / self.plane.m
+            
+            V += a*dt
+            x += V*dt
+            t += dt
 
-        evt_stop.terminal = True
-        evt_stop.direction = -1
-
-        if t_eval is None:
-            t_eval = np.linspace(t_span[0], t_span[1], 800)
-
-        sol = solve_ivp(f, t_span, [x0, V0], events=[evt_stop], t_eval=t_eval, max_step=0.2)
-
-        for ti, xi, Vi in zip(sol.t, sol.y[0], sol.y[1]):
-            self._record(ti, xi, 0.0, 0.0, Vi, 'landing_roll')
-
-        stopped = len(sol.t_events[0]) > 0
-        t_stop = float(sol.t_events[0][0]) if stopped else None
-        x_stop = float(np.interp(t_stop, sol.t, sol.y[0])) if stopped else None
-
-        return {'solution': sol, 'stopped': stopped, 't_stop': t_stop, 'x_stop': x_stop}
+        return {"stopped": True, "t_stop": t, "x_stop": x}
 
 
 # ------ GLOBAL FUNCTIONS --------------------------------------------------------------
