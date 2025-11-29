@@ -1,15 +1,19 @@
+"""
+Ground Operations Module
+
+Handles all ground-based airport operations including:
+- Runway scheduling and management
+- Gate allocation and management
+- Aircraft taxiing operations
+- Queue management for takeoffs and landings
+
+Designed for London City Airport (LCY) constraints.
+"""
+
 import random
-import time
+from typing import Optional, List, Dict
+from aircraft import Plane
 
-# DUMMY PLANE CLASS
-class Plane:
-    def __init__(self, callsign):
-        self.callsign = callsign
-        self.state = "init"
-        self.assigned_gate = None
-
-    def __repr__(self):
-        return f"<Plane {self.callsign}, state={self.state}, gate={self.assigned_gate}>"
 
 # ------ GROUND OPERATION CLASSES --------------------------------------------------------------
 class GroundOperations:
@@ -257,31 +261,3 @@ class GroundOperations:
                 plane.state = "taking_off"
 
                 # After takeoff → plane leaves ops, no taxi needed
-
-# Create airport ground system
-ops = GroundOperations(runway_length=1500, num_gates=19)
-
-# Create planes
-A = Plane("BA001")
-B = Plane("BA002")
-
-# Schedule landing for plane A
-ops.request_landing_slot(A)
-
-# Simulation loop
-current_time = 0.0
-timestep = 5.0   # 5 second increments
-
-for step in range(20):
-
-    print(f"\n--- TIME = {current_time} ---")
-    ops.update(current_time)
-
-    # Print debug state
-    print("Runway busy:", ops.runway_busy)
-    print("Landing queue:", ops.landing_queue)
-    print("Takeoff queue:", ops.takeoff_queue)
-    print("Taxiing planes:", ops.taxiing_planes)
-    print("Gates:", ops.gates[:5], "...")  # print first 5 gates
-
-    current_time += timestep
