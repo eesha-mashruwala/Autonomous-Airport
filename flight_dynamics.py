@@ -99,6 +99,32 @@ class FlightDynamics:
     def clear_telemetry(self):
         """Clear all telemetry data."""
         self._telemetry = []
+    
+    def get_history(self):
+        """
+        Get telemetry data as numpy arrays for plotting.
+        
+        Returns
+        -------
+        dict
+            Dictionary with arrays for each telemetry field (t, x, y, z, V, etc.)
+        """
+        import numpy as np
+        if not self._telemetry:
+            return {}
+        
+        # Extract all keys from first entry
+        keys = self._telemetry[0].keys()
+        
+        # Create dictionary of numpy arrays
+        history = {}
+        for key in keys:
+            if key == "time":
+                history['t'] = np.array([entry[key] for entry in self._telemetry])
+            else:
+                history[key] = np.array([entry[key] for entry in self._telemetry])
+        
+        return history
 
     # ------------------------ VELOCITY/TRUE AIRSPEED -------------------------
     def compute_airspeed_derivative(self, V, gamma, thrust):
@@ -152,7 +178,7 @@ class FlightDynamics:
         """
         Simulate ground roll (1D along runway) using Newton's 2nd law.
         
-        Equation: m * dV/dt = T - D - F_rr - mg*sin(θ)
+        Equation: m * dV/dt = T - D - F_rr
         
         Integrates until velocity reaches rotation speed Vr.
         
@@ -176,16 +202,29 @@ class FlightDynamics:
         t = 0.0
 
         self.clear_telemetry()
-
+        
+        # Simplified constants for ground roll
+        mu_rr = 0.02  # rolling resistance coefficient
+        
         while V < Vr and t < max_time:
             # Compute forces
             self.T = self._plane.compute_thrust(V)
-            self.D = self._plane.compute_drag(V)
-            self.L = self._plane.compute_aerodynamic_lift(V)
-            self.F_rr = self._plane.compute_rolling_friction(V)
+            
+            # Simple drag during ground roll (low speed, use baseline CD)
+            if V < 1.0:
+                self.D = 0.0
+            else:
+                # Use simplified drag with CD0 + small induced component
+                CL_ground = min(0.3, 2 * self._plane.mass * 9.81 / (self._plane._rho * V**2 * self._plane._S))
+                CD_ground = self._plane._CD0 + 0.1 * CL_ground**2
+                self.D = 0.5 * self._plane._rho * V**2 * self._plane._S * CD_ground
+            
+            # Rolling friction (reduces as lift increases)
+            self.L = 0.5 * self._plane._rho * V**2 * self._plane._S * min(0.3, CL_ground) if V >= 1.0 else 0.0
+            self.F_rr = mu_rr * (self._plane.mass * 9.81 - self.L)
 
-            # Net acceleration
-            a = (self.T - self.D - self.F_rr - self._plane.mass * 9.81 * math.sin(self._theta)) / self._plane.mass
+            # Net acceleration (assume flat runway, theta=0)
+            a = (self.T - self.D - self.F_rr) / self._plane.mass
 
             # Euler integration
             V += a * dt
@@ -208,14 +247,14 @@ class FlightDynamics:
         }
 
     # ------------------------------ CLIMB ----------------------------------
-    def climb_phase(self, t_end=60.0, dt=0.1, target_altitude=1000.0, gamma=0.1):
+    def climb_phase(self, t_end=60.0, dt=0.1, target_altitude=1000.0, gamma=0.1, V_target=85.0):
         """
         Simplified climb phase using 3D kinematics and dynamics.
         
         Equations:
         - dx/dt = V*cos(γ)*cos(ψ)
         - dy/dt = V*cos(γ)*sin(ψ)
-        - dz/dt = -V*sin(γ)  (note: z-axis points down in aviation convention)
+        - dz/dt = V*sin(γ)  (positive z = up)
         - m*dV/dt = T - D - mg*sin(γ)
         
         Parameters
@@ -228,6 +267,8 @@ class FlightDynamics:
             Target altitude to reach (m)
         gamma : float
             Climb angle (radians, positive = climbing)
+        V_target : float
+            Target climb speed (m/s)
             
         Returns
         -------
@@ -238,19 +279,25 @@ class FlightDynamics:
         x = y = z = 0.0
         t = 0.0
 
-        while t < t_end and abs(z) < target_altitude:
-            # Compute thrust and drag
-            self.T = self._plane.compute_thrust(self.V)
+        while t < t_end and z < target_altitude:
+            # Use high thrust during climb to maintain/increase speed
+            # Full throttle until we reach target speed, then moderate
+            if self.V < V_target:
+                throttle_factor = 0.95  # near full thrust for acceleration
+            else:
+                throttle_factor = 0.75  # maintain speed
+            
+            self.T = self._plane.compute_thrust(self.V) * throttle_factor
             self.D = self._plane.compute_drag(self.V, self.gamma)
 
-            # Velocity change
+            # Velocity change using ODE
             dVdt = self.compute_airspeed_derivative(self.V, self.gamma, self.T)
             self.V += dVdt * dt
 
-            # Position updates
+            # Position updates (positive z = up)
             x += self.V * math.cos(self.gamma) * math.cos(self.psi) * dt
             y += self.V * math.cos(self.gamma) * math.sin(self.psi) * dt
-            z += -self.V * math.sin(self.gamma) * dt  # negative because z-down
+            z += self.V * math.sin(self.gamma) * dt  # positive z = climbing
 
             t += dt
 
@@ -259,7 +306,7 @@ class FlightDynamics:
             self.x = x
             self.y = y
             self.z = z
-            self.throttle_cmd = 0.8
+            self.throttle_cmd = throttle_factor
             self._record()
 
         return {

@@ -20,7 +20,7 @@ from arrival_routes import (
     RUNWAY_END,
     AIRSPACE_RADIUS,
 )
-from aircraft import EmbraerE170
+from aircraft import EmbraerE170, AirbusA220, Dash8_400, ATR72_600
 from flight_dynamics import FlightDynamics
 
 # ---------------------- SIMULATION PARAMETERS ------------------------------
@@ -168,6 +168,7 @@ def animate_live(route, simulator):
             color='black', linewidth=6, label='Runway')
 
     point, = ax.plot([], [], [], 'ro', markersize=6, label='Aircraft')
+    label = ax.text(0, 0, 0, "", fontsize=8, color='red')
     trail, = ax.plot([], [], [], color='blue', linewidth=2, label='Flown Path')
 
     ax.set_xlim([-AIRSPACE_RADIUS, AIRSPACE_RADIUS])
@@ -185,18 +186,23 @@ def animate_live(route, simulator):
     def init():
         point.set_data([], [])
         point.set_3d_properties([])
+        label.set_position((0, 0))
+        label.set_3d_properties(0)
         trail.set_data([], [])
         trail.set_3d_properties([])
-        return point, trail
+        return point, trail, label
 
     def update(pos):
         positions.append(pos)
         point.set_data([pos[0]], [pos[1]])
         point.set_3d_properties([pos[2]])
+        label.set_position((pos[0], pos[1]))
+        label.set_3d_properties(pos[2] + 20)
+        label.set_text(simulator.plane.id)
         path = np.array(positions)
         trail.set_data(path[:, 0], path[:, 1])
         trail.set_3d_properties(path[:, 2])
-        return point, trail
+        return point, trail, label
 
     ani = animation.FuncAnimation(
         fig, update, frames=simulator, init_func=init,
@@ -208,8 +214,12 @@ def animate_live(route, simulator):
 if __name__ == "__main__":
     routes = generate_arrival_routes(num_routes=20)
     route = random.choice(routes)
-    plane = EmbraerE170("ARR-SIM")
+    fleet = [EmbraerE170, AirbusA220, Dash8_400, ATR72_600]
+    plane_cls = random.choice(fleet)
+    plane_id = f"{plane_cls.__name__}-{random.randint(100, 999)}"
+    plane = plane_cls(plane_id)
     print(f"Selected route: {route['name']} ({route['description']})")
+    print(f"Selected aircraft: {plane.plane_type} ({plane.id})")
     simulator = ArrivalSimulator(route, plane)
 
     fig, ani = animate_live(route, simulator)

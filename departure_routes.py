@@ -74,16 +74,13 @@ def _generate_route_waypoints(heading_deg):
     straight_end = min(straight_end, BOUNDARY_DISTANCE)
     positions.append([straight_end, 0.0, 0.0])
     
-    if straight_end >= BOUNDARY_DISTANCE:
-        # already at boundary; no additional turn segment
-        return np.array(_apply_climb_profile(positions))
-    
     # Second segment: continue climbing while turning to heading_deg until boundary
     heading_rad = math.radians(heading_deg)
     remaining_distance = BOUNDARY_DISTANCE - straight_end
     target_x = straight_end + remaining_distance * math.cos(heading_rad)
     target_y = remaining_distance * math.sin(heading_rad)
     
+    # Force final waypoint on boundary circle
     positions.append([target_x, target_y, 0.0])
     
     return np.array(_apply_climb_profile(positions))

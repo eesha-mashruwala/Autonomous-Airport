@@ -62,7 +62,7 @@ class Plane:
 
         # Engine/thrust parameters (defaults, can be overridden)
         self._T0 = 120000.0  # static thrust total (N)
-        self._Ct = 0.0       # thrust decay coefficient (per m/s)
+        self._Ct = 0.00015   # thrust decay coefficient (per m/s) - small decay
 
         # Rolling friction coefficient
         self._mu_rr = 0.02
@@ -201,6 +201,8 @@ class Plane:
         """
         Lift Coefficient: C_L = (2 * m * g * cos(γ) * cos(φ)) / (ρ * V^2 * S)
         
+        Capped at CL_max to prevent numerical instability at low speeds.
+        
         Parameters
         ----------
         V : float
@@ -219,7 +221,9 @@ class Plane:
             return 0.0
         num = 2 * self._mass * 9.81 * math.cos(gamma) * math.cos(phi)
         den = self._rho * V**2 * self._S
-        return num / den
+        CL = num / den
+        # Cap at CL_max to prevent unrealistic induced drag at low speeds
+        return min(CL, self._CL_max)
 
     def compute_aerodynamic_lift(self, V, gamma=0.0, phi=0.0):
         """
@@ -261,7 +265,8 @@ class Plane:
             Rolling friction force (N)
         """
         L = self.compute_aerodynamic_lift(V)
-        return self._mu_rr * (self._mass * 9.81 - L)
+        friction = self._mu_rr * (self._mass * 9.81 - L)
+        return max(0.0, friction)
 
     def compute_braking_force(self, beta=1.0, mu_b=0.3):
         """
@@ -317,6 +322,10 @@ class AirbusA220(Plane):
             e=0.8
         )
         self.plane_type = 'AirbusA220'
+        # Pratt & Whitney PW1500G engines (2x 10,600 kgf ≈ 208,000 N total)
+        # Increased to 240,000 N for climb performance to 105 m/s
+        self._T0 = 240000.0
+        self._Ct = 0.0002
 
 
 class EmbraerE170(Plane):
@@ -336,6 +345,9 @@ class EmbraerE170(Plane):
             e=0.82
         )
         self.plane_type = 'EmbraerE170'
+        # GE CF34-8E engines (2x 6,830 kgf ≈ 134,000 N total)
+        self._T0 = 134000.0
+        self._Ct = 0.00018
 
 
 class Dash8_400(Plane):
@@ -355,6 +367,10 @@ class Dash8_400(Plane):
             e=0.82
         )
         self.plane_type = 'Dash8_400'
+        # PW150A engines (2x 5,071 shp ≈ 75,000 N equivalent thrust)
+        # Increased to 97,000 N for climb performance to 105 m/s
+        self._T0 = 97000.0
+        self._Ct = 0.00015
 
 
 class ATR72_600(Plane):
@@ -374,3 +390,7 @@ class ATR72_600(Plane):
             e=0.82
         )
         self.plane_type = 'ATR72_600'
+        # PW127M engines (2x 2,750 shp ≈ 55,000 N equivalent thrust)
+        # Increased to 76,000 N for climb performance to 105 m/s
+        self._T0 = 76000.0
+        self._Ct = 0.00012
