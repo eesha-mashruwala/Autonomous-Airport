@@ -41,7 +41,7 @@ def clamp(val, lo, hi):
 class ArrivalSimulator:
     """Iterator providing live aircraft positions as it flies the route."""
 
-    def __init__(self, route, plane):
+    def __init__(self, route, plane, verbose=True):
         self.route = route
         self.plane = plane
         self.dyn = FlightDynamics(plane)
@@ -59,6 +59,7 @@ class ArrivalSimulator:
         self.rollout_points = []
         self.rollout_index = 0
         self.finished = False
+        self.verbose = verbose
         
         # Track speed and time for plotting
         self.time_hist = []
@@ -109,7 +110,8 @@ class ArrivalSimulator:
             dist = math.sqrt(horiz**2 + vec[2]**2)
 
             if np.dot(vec, seg_vec) <= 0:
-                print(f"Overshot waypoint {self.segment + 1}, retargeting next segment.")
+                if self.verbose:
+                    print(f"Overshot waypoint {self.segment + 1}, retargeting next segment.")
                 self.segment += 1
                 self.seg_start = self.pos.copy()
                 if self.segment >= len(self.wps) - 1:
@@ -120,7 +122,8 @@ class ArrivalSimulator:
 
             if dist < 5.0:
                 self.pos = target.copy()
-                print(f"Reached waypoint {self.segment + 1}/{len(self.wps)-1}")
+                if self.verbose:
+                    print(f"Reached waypoint {self.segment + 1}/{len(self.wps)-1}")
                 if self.segment == len(self.wps) - 2:
                     self.landed = True
                     self._start_rollout()
@@ -180,20 +183,23 @@ class ArrivalSimulator:
         self.pos[2] += self.V * math.sin(self.gamma) * DT
 
         # Live tracker output
-        print(
-            f"Seg {self.segment+1}/{len(self.wps)-1} | Pos {self.pos} | "
-            f"HDG {math.degrees(self.psi):.1f}° | Gamma {math.degrees(self.gamma):.2f}° "
-            f"| V {self.V:.1f} m/s | Target WP {target}"
-        )
+        if self.verbose:
+            print(
+                f"Seg {self.segment+1}/{len(self.wps)-1} | Pos {self.pos} | "
+                f"HDG {math.degrees(self.psi):.1f}° | Gamma {math.degrees(self.gamma):.2f}° "
+                f"| V {self.V:.1f} m/s | Target WP {target}"
+            )
 
         if not self.clearance_given and self.segment == len(self.wps) - 2:
             self.clearance_given = True
-            print("ATC: Cleared to land.")
+            if self.verbose:
+                print("ATC: Cleared to land.")
 
         return self.pos.copy()
 
     def _start_rollout(self):
-        print("Touchdown. Beginning rollout...")
+        if self.verbose:
+            print("Touchdown. Beginning rollout...")
         rollout_dyn = FlightDynamics(self.plane)
         rollout_dyn.reset_state()
         # Use actual approach speed at touchdown, not the hardcoded FINAL_SPEED
@@ -202,10 +208,12 @@ class ArrivalSimulator:
         for entry in rollout_dyn.telemetry():
             x_offset = entry["x"]
             self.rollout_points.append(np.array([RUNWAY_THRESHOLD[0] + x_offset, 0.0, 0.0]))
-            print(f"Rollout: x={x_offset:.1f} m, V={entry['V']:.1f} m/s")
+            if self.verbose:
+                print(f"Rollout: x={x_offset:.1f} m, V={entry['V']:.1f} m/s")
         if not self.rollout_points:
             self.rollout_points.append(RUNWAY_THRESHOLD.copy())
-        print("Rollout complete. Holding position for inspection.")
+        if self.verbose:
+            print("Rollout complete. Holding position for inspection.")
 
 
 def animate_live(route, simulator):
@@ -270,12 +278,15 @@ if __name__ == "__main__":
     plane_cls = random.choice(fleet)
     plane_id = f"{plane_cls.__name__}-{random.randint(100, 999)}"
     plane = plane_cls(plane_id)
-    print(f"Selected route: {route['name']} ({route['description']})")
-    print(f"Selected aircraft: {plane.plane_type} ({plane.id})")
-    simulator = ArrivalSimulator(route, plane)
+    verbose = True  # Set to False to suppress prints
+    if verbose:
+        print(f"Selected route: {route['name']} ({route['description']})")
+        print(f"Selected aircraft: {plane.plane_type} ({plane.id})")
+    simulator = ArrivalSimulator(route, plane, verbose=verbose)
 
     fig, ani = animate_live(route, simulator)
-    print("Simulation running. Close the window to finish.")
+    if verbose:
+        print("Simulation running. Close the window to finish.")
     plt.show()
     
     # Plot speed vs time
@@ -300,4 +311,5 @@ if __name__ == "__main__":
     plt.tight_layout()
     plt.show()
     
-    print(f"\nFinal approach speed: {simulator.speed_hist[-1]:.1f} m/s (target: {FINAL_SPEED} m/s)")
+    if verbose:
+        print(f"\nFinal approach speed: {simulator.speed_hist[-1]:.1f} m/s (target: {FINAL_SPEED} m/s)")

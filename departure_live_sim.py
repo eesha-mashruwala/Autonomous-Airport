@@ -41,11 +41,12 @@ class DepartureSimulator:
     Uses realistic flight dynamics ODEs for takeoff and climb.
     """
 
-    def __init__(self, route, plane):
+    def __init__(self, route, plane, verbose=True):
         self.route = route
         self.plane = plane
         self.wps = route["waypoints"]
         self.finished = False
+        self.verbose = verbose
         
         # Flight phases
         self.phase = "GROUND_ROLL"  # GROUND_ROLL -> CLIMB -> CRUISE
@@ -54,16 +55,18 @@ class DepartureSimulator:
         self.dyn = FlightDynamics(plane)
         
         # Run ground roll simulation using flight_dynamics
-        print(f"\n{'='*60}")
-        print(f"Starting ground roll for {plane.plane_type} ({plane.id})")
-        print(f"Target rotation speed: {VR} m/s")
-        print(f"{'='*60}")
+        if self.verbose:
+            print(f"\n{'='*60}")
+            print(f"Starting ground roll for {plane.plane_type} ({plane.id})")
+            print(f"Target rotation speed: {VR} m/s")
+            print(f"{'='*60}")
         
         takeoff_result = self.dyn.ground_roll_takeoff(dt=0.05, Vr=VR, max_time=120.0)
         self.ground_roll_data = self.dyn.get_history()
         
-        print(f"✓ Takeoff complete: V={takeoff_result['V_rot']:.1f} m/s, "
-              f"distance={takeoff_result['distance']:.1f} m, time={takeoff_result['time']:.1f} s")
+        if self.verbose:
+            print(f"✓ Takeoff complete: V={takeoff_result['V_rot']:.1f} m/s, "
+                  f"distance={takeoff_result['distance']:.1f} m, time={takeoff_result['time']:.1f} s")
         
         # Set up initial heading based on route
         self.psi = math.atan2(self.wps[1][1] - self.wps[0][1],
@@ -124,7 +127,8 @@ class DepartureSimulator:
                 
                 # Check if we reached rotation speed - IMMEDIATELY transition to climb
                 if self.V >= VR * 0.99 and not self.climb_started:
-                    print(f"\n✓ Rotation! V={self.V:.1f} m/s at x={self.pos[0]:.0f}m, transitioning to CLIMB")
+                    if self.verbose:
+                        print(f"\n✓ Rotation! V={self.V:.1f} m/s at x={self.pos[0]:.0f}m, transitioning to CLIMB")
                     self.phase = "CLIMB"
                     self.climb_started = True
                     
@@ -163,7 +167,8 @@ class DepartureSimulator:
                     
                     self.segment = best_segment
                     self.seg_start = self.pos.copy()
-                    print(f"  → Targeting waypoint {self.segment + 1} for smoothest climb (turn angle: {math.degrees(min_turn_angle):.1f}°)")
+                    if self.verbose:
+                        print(f"  → Targeting waypoint {self.segment + 1} for smoothest climb (turn angle: {math.degrees(min_turn_angle):.1f}°)")
                     
                     # Don't return here - continue immediately to climb phase
                 else:
@@ -176,13 +181,15 @@ class DepartureSimulator:
                 self.segment = 0
                 self.seg_start = self.pos.copy()
                 self.dyn.gamma = math.radians(8)
-                print(f"\n✓ Ground roll complete, transitioning to CLIMB from segment {self.segment}")
+                if self.verbose:
+                    print(f"\n✓ Ground roll complete, transitioning to CLIMB from segment {self.segment}")
 
         # =================== PHASE 2: CLIMB ===================
         if self.phase == "CLIMB":
             # Boundary check - exit when reaching airspace limit
             if np.hypot(self.pos[0], self.pos[1]) >= AIRSPACE_RADIUS:
-                print(f"✓ Reached airspace boundary at {np.hypot(self.pos[0], self.pos[1]):.0f}m")
+                if self.verbose:
+                    print(f"✓ Reached airspace boundary at {np.hypot(self.pos[0], self.pos[1]):.0f}m")
                 self.finished = True
                 raise StopIteration
             
@@ -226,7 +233,8 @@ class DepartureSimulator:
 
                 # Check if we overshot the waypoint (dot product test)
                 if np.dot(vec, seg_vec) <= 0 and dist_3d > 50.0:
-                    print(f"⚠ Overshot waypoint {self.segment+1}, advancing to next segment")
+                    if self.verbose:
+                        print(f"⚠ Overshot waypoint {self.segment+1}, advancing to next segment")
                     self.segment += 1
                     self.seg_start = self.pos.copy()
                     if self.segment >= len(self.wps) - 1:
@@ -235,8 +243,9 @@ class DepartureSimulator:
 
                 # Check if reached waypoint (proximity test)
                 if dist_3d < 50.0:
-                    print(f"✓ Reached waypoint {self.segment+1}/{len(self.wps)-1}: "
-                          f"pos=({target[0]:.0f}, {target[1]:.0f}, {target[2]:.0f})")
+                    if self.verbose:
+                        print(f"✓ Reached waypoint {self.segment+1}/{len(self.wps)-1}: "
+                              f"pos=({target[0]:.0f}, {target[1]:.0f}, {target[2]:.0f})")
                     self.segment += 1
                     self.seg_start = target.copy()
                     if self.segment >= len(self.wps) - 1:
@@ -319,7 +328,7 @@ class DepartureSimulator:
             self.climb_time += ANIMATION_DT
             
             # Periodic debug output (every 2 seconds)
-            if int(current_time) % 2 == 0 and abs(current_time - int(current_time)) < ANIMATION_DT:
+            if self.verbose and int(current_time) % 2 == 0 and abs(current_time - int(current_time)) < ANIMATION_DT:
                 if self.segment < len(self.wps) - 1:
                     target = self.wps[self.segment + 1]
                     dist_to_wp = np.linalg.norm(target - self.pos)
@@ -417,9 +426,12 @@ def animate_live(route, simulator):
 
 
 if __name__ == "__main__":
-    print("\n" + "="*60)
-    print("LIVE DEPARTURE SIMULATION")
-    print("="*60)
+    verbose = True  # Set to False to suppress prints
+    
+    if verbose:
+        print("\n" + "="*60)
+        print("LIVE DEPARTURE SIMULATION")
+        print("="*60)
     
     # Select random route and aircraft
     routes = generate_departure_routes()
@@ -429,20 +441,22 @@ if __name__ == "__main__":
     plane_id = f"{plane_cls.__name__}-{random.randint(100, 999)}"
     plane = plane_cls(plane_id)
     
-    print(f"Route: {route['name']} (heading {route['heading']}°)")
-    print(f"Aircraft: {plane.plane_type} ({plane.id})")
-    print(f"Mass: {plane.mass:.0f} kg | Thrust: {plane._T0:.0f} N | T/W: {plane._T0/(plane.mass*9.81):.3f}")
-    print(f"\nRoute waypoints ({len(route['waypoints'])} total):")
-    for i, wp in enumerate(route['waypoints']):
-        print(f"  WP{i}: ({wp[0]:.0f}, {wp[1]:.0f}, {wp[2]:.0f})")
+    if verbose:
+        print(f"Route: {route['name']} (heading {route['heading']}°)")
+        print(f"Aircraft: {plane.plane_type} ({plane.id})")
+        print(f"Mass: {plane.mass:.0f} kg | Thrust: {plane._T0:.0f} N | T/W: {plane._T0/(plane.mass*9.81):.3f}")
+        print(f"\nRoute waypoints ({len(route['waypoints'])} total):")
+        for i, wp in enumerate(route['waypoints']):
+            print(f"  WP{i}: ({wp[0]:.0f}, {wp[1]:.0f}, {wp[2]:.0f})")
     
     # Create simulator
-    simulator = DepartureSimulator(route, plane)
+    simulator = DepartureSimulator(route, plane, verbose=verbose)
 
     # Run animation
-    print("\n" + "="*60)
-    print("Starting live animation...")
-    print("="*60)
+    if verbose:
+        print("\n" + "="*60)
+        print("Starting live animation...")
+        print("="*60)
     fig, ani = animate_live(route, simulator)
     plt.show()
     
