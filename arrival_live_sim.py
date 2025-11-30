@@ -25,12 +25,13 @@ from flight_dynamics import FlightDynamics
 
 # ---------------------- SIMULATION PARAMETERS ------------------------------
 DT = 0.2                 # s timestep for live animation
-CRUISE_SPEED = 85.0      # m/s before final
-FINAL_SPEED = 70.0       # m/s on last leg and touchdown
+CRUISE_SPEED = 85.0      # m/s before final approach
+APPROACH_SPEED = 75.0    # m/s on approach
+FINAL_SPEED = 65.0       # m/s for landing (touchdown speed)
 HEADING_GAIN = 2.4       # proportional heading -> bank
 GAMMA_GAIN = 0.8         # proportional vertical controller
 MAX_BANK_RAD = math.radians(55)
-V_THROTTLE_GAIN = 0.5    # throttle gain to hold target speed
+V_THROTTLE_GAIN = 1.2    # throttle gain to hold target speed (increased for better control)
 
 
 def clamp(val, lo, hi):
@@ -58,6 +59,16 @@ class ArrivalSimulator:
         self.rollout_points = []
         self.rollout_index = 0
         self.finished = False
+        
+        # Track speed and time for plotting
+        self.time_hist = []
+        self.speed_hist = []
+        self.current_time = 0.0
+        
+        # Track speed and time for plotting
+        self.time_hist = []
+        self.speed_hist = []
+        self.current_time = 0.0
 
     def __iter__(self):
         return self
@@ -80,7 +91,17 @@ class ArrivalSimulator:
 
         while True:
             target = np.array(self.wps[self.segment + 1], dtype=float)
-            target_speed = FINAL_SPEED if self.segment >= len(self.wps) - 2 else CRUISE_SPEED
+            
+            # Progressive speed reduction for landing
+            # Last 3 segments: target 65 m/s (final approach - start slowing earlier)
+            # 4th from last: target 75 m/s (approach speed)
+            # Earlier segments: cruise at 85 m/s
+            if self.segment >= len(self.wps) - 3:
+                target_speed = FINAL_SPEED  # 65 m/s for final approach
+            elif self.segment >= len(self.wps) - 4:
+                target_speed = APPROACH_SPEED  # 75 m/s for approach
+            else:
+                target_speed = CRUISE_SPEED  # 85 m/s cruise
 
             vec = target - self.pos
             seg_vec = target - self.seg_start
@@ -118,17 +139,47 @@ class ArrivalSimulator:
 
         self.gamma += clamp(GAMMA_GAIN * (target_gamma - self.gamma), -0.05, 0.05)
 
+        # Dynamic speed control using throttle and drag
+        # Use aggressive proportional control to reach target speed
         speed_err = target_speed - self.V
-        thrust = self.plane.compute_thrust(self.V) * clamp(
-            0.3 + V_THROTTLE_GAIN * speed_err / target_speed, 0.0, 1.0
-        )
-        dVdt = self.dyn.compute_airspeed_derivative(self.V, self.gamma, thrust)
+        
+        # Very aggressive throttle control for proper deceleration
+        # The aircraft needs to slow down significantly for landing
+        speedbrake_multiplier = 1.0  # Normal drag
+        
+        if speed_err < -10.0:  # Way too fast - idle with speedbrakes effect
+            throttle_setting = 0.0  # Full idle
+            speedbrake_multiplier = 4.0  # Deploy speedbrakes for extra drag
+        elif speed_err < -3.0:  # Too fast - go to idle
+            throttle_setting = 0.0  # Idle thrust for drag deceleration
+            speedbrake_multiplier = 3.5  # Moderate speedbrakes
+        elif speed_err < 0:  # Slightly too fast - minimal thrust
+            # Very low throttle when still above target
+            throttle_setting = clamp(0.02 + 0.1 * speed_err / target_speed, 0.0, 0.08)
+            speedbrake_multiplier = 2.5  # Light speedbrakes
+        else:  # Too slow - add thrust proportionally
+            throttle_setting = clamp(0.3 + V_THROTTLE_GAIN * speed_err / target_speed, 0.08, 0.85)
+        
+        thrust = self.plane.compute_thrust(self.V) * throttle_setting
+        
+        # Compute drag with speedbrake multiplier
+        base_drag = self.plane.compute_drag(self.V, self.gamma)
+        drag = base_drag * speedbrake_multiplier
+        
+        # Manually compute dV/dt with modified drag
+        dVdt = (thrust - drag - self.plane.mass * 9.81 * math.sin(self.gamma)) / self.plane.mass
         self.V = max(60.0, self.V + dVdt * DT)
+        
+        # Record time and speed
+        self.current_time += DT
+        self.time_hist.append(self.current_time)
+        self.speed_hist.append(self.V)
 
         self.pos[0] += self.V * math.cos(self.gamma) * math.cos(self.psi) * DT
         self.pos[1] += self.V * math.cos(self.gamma) * math.sin(self.psi) * DT
         self.pos[2] += self.V * math.sin(self.gamma) * DT
 
+        # Live tracker output
         print(
             f"Seg {self.segment+1}/{len(self.wps)-1} | Pos {self.pos} | "
             f"HDG {math.degrees(self.psi):.1f}° | Gamma {math.degrees(self.gamma):.2f}° "
@@ -145,7 +196,8 @@ class ArrivalSimulator:
         print("Touchdown. Beginning rollout...")
         rollout_dyn = FlightDynamics(self.plane)
         rollout_dyn.reset_state()
-        rollout_dyn.ground_roll_landing(dt=DT, V_touchdown=FINAL_SPEED, T_reverse=50000.0)
+        # Use actual approach speed at touchdown, not the hardcoded FINAL_SPEED
+        rollout_dyn.ground_roll_landing(dt=DT, V_touchdown=self.V, T_reverse=50000.0)
         self.rollout_points = []
         for entry in rollout_dyn.telemetry():
             x_offset = entry["x"]
@@ -225,3 +277,27 @@ if __name__ == "__main__":
     fig, ani = animate_live(route, simulator)
     print("Simulation running. Close the window to finish.")
     plt.show()
+    
+    # Plot speed vs time
+    fig_speed = plt.figure(figsize=(10, 6))
+    ax_speed = fig_speed.add_subplot(111)
+    
+    ax_speed.plot(simulator.time_hist, simulator.speed_hist, 'b-', linewidth=2, label='Actual Speed')
+    ax_speed.axhline(FINAL_SPEED, color='r', linestyle='--', linewidth=2, 
+                     label=f'Target Landing Speed ({FINAL_SPEED} m/s)', alpha=0.7)
+    ax_speed.axhline(APPROACH_SPEED, color='orange', linestyle='--', linewidth=1.5, 
+                     label=f'Approach Speed ({APPROACH_SPEED} m/s)', alpha=0.6)
+    ax_speed.axhline(CRUISE_SPEED, color='green', linestyle='--', linewidth=1.5, 
+                     label=f'Cruise Speed ({CRUISE_SPEED} m/s)', alpha=0.6)
+    
+    ax_speed.set_xlabel('Time (s)', fontsize=12)
+    ax_speed.set_ylabel('Speed (m/s)', fontsize=12)
+    ax_speed.set_title(f'Arrival Speed Profile - {plane.plane_type} ({plane.id})', 
+                       fontsize=14, fontweight='bold')
+    ax_speed.legend(loc='best', fontsize=10)
+    ax_speed.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    print(f"\nFinal approach speed: {simulator.speed_hist[-1]:.1f} m/s (target: {FINAL_SPEED} m/s)")
