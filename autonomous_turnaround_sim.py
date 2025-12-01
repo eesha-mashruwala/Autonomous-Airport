@@ -13,15 +13,28 @@ All phases are shown on one 3D plot with console logs for each transition.
 """
 
 import argparse
+import json
 import math
 import random
+from typing import Optional
 import numpy as np
 import matplotlib
 matplotlib.use('TkAgg')  # Force interactive backend
 import matplotlib.pyplot as plt
 from matplotlib import animation
 
-from arrival_live_sim import ArrivalSimulator, DT as ARRIVAL_DT
+from arrival_live_sim import (
+    ArrivalSimulator,
+    DT as ARRIVAL_DT,
+    CRUISE_SPEED,
+    APPROACH_SPEED,
+    FINAL_SPEED,
+    HEADING_GAIN,
+    GAMMA_GAIN,
+    MAX_BANK_RAD,
+    V_THROTTLE_GAIN,
+    clamp,
+)
 from arrival_routes import (
     generate_arrival_routes,
     RUNWAY_THRESHOLD,
@@ -32,9 +45,11 @@ from departure_live_sim import DepartureSimulator, ANIMATION_DT as DEPARTURE_DT
 from departure_routes import generate_departure_routes
 from ground_operations import GroundOperations, RUNWAY_LENGTH
 from aircraft import EmbraerE170, AirbusA220, Dash8_400, ATR72_600
+from flight_dynamics import WindModel, FlightDynamics
 
 # Service time bounds (seconds)
 SERVICE_TIME_RANGE = (20, 35)
+EMERGENCY_SERVICE_TIME_RANGE = (40, 60)  # Emergency aircraft need longer service time
 
 # Fleet to sample from
 FLEET = [EmbraerE170, AirbusA220, Dash8_400, ATR72_600]
@@ -46,6 +61,8 @@ INTER_ARRIVAL_MEAN = 105.0  # seconds between new arrivals (mean)
 MIN_SPAWN_INTERVAL = 45.0   # seconds, safety lower bound
 MAX_ACTIVE_AIRCRAFT = 4
 GLOBAL_DT = DEPARTURE_DT  # base time step for orchestration
+HOLD_ALTITUDE_THRESHOLD = 200.0  # meters
+LANDING_CLEAR_BUFFER = 10.0  # seconds runway occupancy buffer for arrival ahead
 
 
 class AircraftInfoWindow:
@@ -89,39 +106,113 @@ class AircraftInfoWindow:
             plt.close(self.fig)
 
 
+class ATCConsoleWindow:
+    """Dedicated matplotlib window for ATC/terminal updates."""
+
+    def __init__(self, enabled: bool = True, title: str = "ATC Control"):
+        self.enabled = enabled
+        self.lines: list[str] = []
+        self.max_lines = 120
+        if self.enabled:
+            self.fig = plt.figure(figsize=(8, 6))
+            self.fig.canvas.manager.set_window_title(title)
+            self.ax = self.fig.add_subplot(111)
+            self.ax.axis("off")
+            self.text = self.ax.text(
+                0.02,
+                0.98,
+                "",
+                transform=self.ax.transAxes,
+                fontfamily="monospace",
+                fontsize=9,
+                verticalalignment="top",
+                wrap=True,
+            )
+            plt.ion()
+            self.fig.show()
+        else:
+            self.fig = None
+            self.ax = None
+            self.text = None
+
+    def add_line(self, line: str):
+        self.lines.append(line)
+        if len(self.lines) > self.max_lines:
+            self.lines.pop(0)
+
+        if self.enabled and self.text is not None:
+            self.text.set_text("\n".join(self.lines))
+            self.fig.canvas.draw_idle()
+            self.fig.canvas.flush_events()
+
+    def close(self):
+        if self.enabled and self.fig is not None:
+            plt.close(self.fig)
+
+
 class TerminalFeed:
     """Manages terminal output for status messages only."""
 
-    def __init__(self):
+    def __init__(self, console_window: Optional[ATCConsoleWindow] = None):
         self.banner_printed = False
+        self.console_window = console_window
+
+    def _emit(self, prefix: str, text: str):
+        line = f"{prefix} | {text}"
+        print(line, flush=True)
+        if self.console_window is not None:
+            self.console_window.add_line(line)
 
     def announce_clearance(self, text: str):
-        print(f"ATC | {text}", flush=True)
+        self._emit("ATC", text)
 
     def runway_status(self, busy: bool, reason: str):
         state = "BUSY" if busy else "FREE"
-        print(f"ATC | Runway {state} → {reason}", flush=True)
+        self._emit("ATC", f"Runway {state} → {reason}")
 
     def gate_event(self, text: str):
-        print(f"GATE | {text}", flush=True)
+        self._emit("GATE", text)
 
     def status_update(self, text: str):
         """General status updates for terminal."""
-        print(f"STATUS | {text}", flush=True)
+        self._emit("STATUS", text)
 
 
 class SingleAircraftTurnaround:
     """State machine for one aircraft from arrival through departure."""
 
-    def __init__(self, ground_ops: GroundOperations, feed: TerminalFeed, visual_mode: bool = True):
-        self.arrival_route = random.choice(generate_arrival_routes(num_routes=20))
-        self.departure_route = random.choice(generate_departure_routes())
-        plane_cls = random.choice(FLEET)
-        plane_id = f"{plane_cls.__name__}-{random.randint(100, 999)}"
-        self.plane = plane_cls(plane_id)
+    def __init__(
+        self,
+        ground_ops: GroundOperations,
+        feed: TerminalFeed,
+        wind_model: WindModel,
+        visual_mode: bool = True,
+        plane=None,
+        arrival_route=None,
+        departure_route=None,
+        is_emergency: bool = False,
+        arrival_sim_cls=ArrivalSimulator,
+        arrival_sim_kwargs: Optional[dict] = None,
+        info_window_enabled: bool = True,
+    ):
+        self.arrival_route = arrival_route or random.choice(generate_arrival_routes(num_routes=20))
+        self.departure_route = departure_route or random.choice(generate_departure_routes())
+        if plane is None:
+            plane_cls = random.choice(FLEET)
+            plane_id = f"{plane_cls.__name__}-{random.randint(100, 999)}"
+            plane = plane_cls(plane_id)
+        self.plane = plane
+        self.is_emergency = is_emergency
 
         self.ground_ops = ground_ops
-        self.arrival_sim = ArrivalSimulator(self.arrival_route, self.plane, verbose=False)
+        self.wind_model = wind_model
+        self.arrival_sim = arrival_sim_cls(
+            self.arrival_route,
+            self.plane,
+            verbose=False,
+            wind_model=self.wind_model,
+            **(arrival_sim_kwargs or {}),
+        )
         self.departure_sim = None
 
         self.state = "arrival"  # arrival -> gate_assignment -> at_gate -> taxi_runway -> runway_hold -> departure -> complete
@@ -130,15 +221,21 @@ class SingleAircraftTurnaround:
         self.sim_time = 0.0
         self.frame_dt = ARRIVAL_DT
         self.feed = feed
-        self.info_window = AircraftInfoWindow(plane_id, enabled=visual_mode)
+        info_enabled = visual_mode and info_window_enabled
+        self.info_window = AircraftInfoWindow(self.plane.id, enabled=info_enabled)
 
         self.landing_busy_marked = False
         self.final_speed_logged = False
         self.runway_hold_logged = False
         self.gate_wait_logged = False
         self.runway_hold_depart_logged = False
+        self.arrival_conflict_logged = False
         self.gate_index = None
+        self.vacate_end_time: Optional[float] = None
+        self.taxi_to_gate_end_time: Optional[float] = None
         self.takeoff_runway_released = False
+        self.runway_exit_position: Optional[np.ndarray] = None
+        self.arrival_hold_active = False
 
         self.service_time = None
         self.service_end_time = None
@@ -174,10 +271,37 @@ class SingleAircraftTurnaround:
         self.info_window.add_line("")
         
         # Terminal status
-        self.feed.status_update(f"{self.plane.id} spawned on {self.arrival_route['name']}")
+        status_msg = f"{self.plane.id} spawned on {self.arrival_route['name']}"
+        if self.is_emergency:
+            status_msg = f"EMERGENCY {status_msg}"
+        self.feed.status_update(status_msg)
 
     def _log(self, message: str):
         print(f"[t={self.sim_time:5.1f}s] {message}")
+
+    def set_arrival_hold(self, active: bool, estimated_hold_time: float = 60.0):
+        """Toggle holding pattern if the arrival simulator supports it."""
+        if hasattr(self.arrival_sim, "set_hold"):
+            self.arrival_sim.set_hold(active, estimated_hold_time)
+        self.arrival_hold_active = bool(active)
+    
+    def _save_trajectory_to_json(self):
+        """Save the aircraft's trajectory data to a JSON file."""
+        trajectory_data = {
+            "plane_id": self.plane.id,
+            "plane_type": self.plane.plane_type,
+            "arrival_route": self.arrival_route["name"],
+            "is_emergency": self.is_emergency,
+            "coordinates": [[float(pos[0]), float(pos[1]), float(pos[2])] for pos in self.trail]
+        }
+        
+        filename = f"trajectory_{self.plane.id}.json"
+        try:
+            with open(filename, 'w') as f:
+                json.dump(trajectory_data, f, indent=2)
+            self._log(f"Trajectory saved to {filename}")
+        except Exception as e:
+            self._log(f"Failed to save trajectory: {e}")
 
     # ------------------------------------------------------------------
     # State machine
@@ -191,6 +315,8 @@ class SingleAircraftTurnaround:
         self.sim_time = global_time
         # Dynamic timestep: arrivals use their native DT, other phases use departure DT
         self.frame_dt = ARRIVAL_DT if self.state in ("arrival", "gate_assignment") else DEPARTURE_DT
+        if self.state != "arrival":
+            self.arrival_hold_active = False
 
         # Free runway when its busy window expires
         if getattr(self.ground_ops, "runway_busy", False) and self.sim_time >= self.ground_ops.runway_free_time:
@@ -200,13 +326,25 @@ class SingleAircraftTurnaround:
 
         if self.state == "arrival":
             return self._advance_arrival()
+        if self.state == "vacating_runway":
+            return self._vacate_runway()
         if self.state == "gate_assignment":
             return self._assign_gate()
+        if self.state == "taxi_to_gate":
+            return self._taxi_from_runway_to_gate()
         if self.state == "at_gate":
             return self._service_at_gate()
         if self.state == "taxi_runway":
             return self._taxi_to_runway()
         if self.state == "runway_hold":
+            if getattr(self.ground_ops, "emergency_active", False) and not self.is_emergency:
+                if not self.runway_hold_depart_logged:
+                    self.info_window.add_line("Runway HOLD - emergency traffic")
+                    self.feed.status_update(f"{self.plane.id} holding for emergency traffic")
+                    self._log("Holding short due to emergency traffic")
+                    self.runway_hold_depart_logged = True
+                return self.position
+
             return self._runway_queue()
         if self.state == "departure":
             return self._advance_departure()
@@ -219,19 +357,34 @@ class SingleAircraftTurnaround:
             self.position = pos.copy()
             self.trail.append(pos.copy())
 
+            # Continuously publish ETA to the threshold so departures can defer
+            eta_to_threshold = self.arrival_sim.estimate_time_to_threshold()
+            self.ground_ops.update_arrival_eta(self.plane, eta_to_threshold, self.sim_time)
+
             if not self.arrival_sim.landed:
                 # Log detailed telemetry to aircraft's window
                 total = len(self.arrival_sim.route["waypoints"]) - 1
                 seg = min(self.arrival_sim.segment + 1, total)
                 target_idx = min(self.arrival_sim.segment + 1, total)
                 target = self.arrival_sim.route["waypoints"][target_idx]
-                self.info_window.add_line(
-                    f"ARR | Seg {seg:02d}/{total:02d} | "
-                    f"Pos ({pos[0]:7.1f}, {pos[1]:7.1f}, {pos[2]:6.1f}) | "
-                    f"HDG {math.degrees(self.arrival_sim.psi):5.1f}° | "
-                    f"Γ {math.degrees(self.arrival_sim.gamma):5.2f}° | "
-                    f"V {self.arrival_sim.V:5.1f} m/s"
-                )
+                
+                # Check if holding
+                is_holding = hasattr(self.arrival_sim, 'hold_active') and self.arrival_sim.hold_active
+                
+                if is_holding:
+                    self.info_window.add_line(
+                        f"ARR | HOLDING | "
+                        f"Alt {pos[2]:6.1f}m | "
+                        f"HDG {math.degrees(self.arrival_sim.psi):5.1f}° | "
+                        f"V {self.arrival_sim.V:5.1f} m/s"
+                    )
+                else:
+                    self.info_window.add_line(
+                        f"ARR | "
+                        f"Pos ({pos[0]:7.1f}, {pos[1]:7.1f}, {pos[2]:6.1f}) | "
+                        f"HDG {math.degrees(self.arrival_sim.psi):5.1f}° | "
+                        f"V {self.arrival_sim.V:5.1f} m/s"
+                    )
             else:
                 # Aircraft has landed - showing rollout telemetry
                 if not self.final_speed_logged:
@@ -241,11 +394,10 @@ class SingleAircraftTurnaround:
                     self.final_speed_logged = True
                 
                 # Log rollout progress
-                rollout_progress = self.arrival_sim.rollout_index
-                rollout_total = len(self.arrival_sim.rollout_points)
                 distance_covered = pos[0] - RUNWAY_THRESHOLD[0]
+                rollout_speed = getattr(self.arrival_sim, "current_rollout_speed", 0.0)
                 self.info_window.add_line(
-                    f"ROLLOUT | Progress {rollout_progress:03d}/{rollout_total:03d} | "
+                    f"ROLLOUT | V={rollout_speed:5.1f} m/s | "
                     f"Distance: {distance_covered:6.1f}m | "
                     f"Pos ({pos[0]:7.1f}, {pos[1]:7.1f}, {pos[2]:6.1f})"
                 )
@@ -278,11 +430,25 @@ class SingleAircraftTurnaround:
             return self.position
         except StopIteration:
             # Landing complete - notify ground ops
+            if self.position is not None:
+                self.runway_exit_position = self.position.copy()
+            else:
+                self.runway_exit_position = RUNWAY_THRESHOLD.copy()
+            self.ground_ops.clear_arrival_eta(self.plane)
             self.ground_ops.complete_landing(self.plane)
-            self.state = "gate_assignment"
-            self.info_window.add_line("Landing rollout COMPLETE - taxiing clear of runway")
-            self.feed.status_update(f"{self.plane.id} landed, vacating runway")
-            self._log("Landing rollout complete; taxiing clear of runway")
+            
+            # Save landing trajectory to JSON file
+            self._save_trajectory_to_json()
+            
+            # Begin short vacate window before taxi to gate
+            vacate_buffer = random.uniform(3.0, 4.0)
+            self.vacate_end_time = self.sim_time + vacate_buffer
+            # Shorten runway busy window to vacate period so it frees promptly
+            self.ground_ops.mark_runway_busy(self.plane, vacate_buffer, self.sim_time)
+            self.state = "vacating_runway"
+            self.info_window.add_line(f"Landing rollout COMPLETE - vacating runway ({vacate_buffer:.1f}s)")
+            self.feed.status_update(f"{self.plane.id} vacating runway (clears in {vacate_buffer:.1f}s)")
+            self._log(f"Landing rollout complete; vacating runway ({vacate_buffer:.1f}s)")
             return self.position
 
     def _assign_gate(self):
@@ -290,7 +456,8 @@ class SingleAircraftTurnaround:
         if self.ground_ops.runway_busy:
             return self.position
 
-        gate = self.ground_ops.allocate_gate(self.plane)
+        reference_pos = self.runway_exit_position if self.runway_exit_position is not None else RUNWAY_THRESHOLD
+        gate = self.ground_ops.allocate_gate(self.plane, reference_position=reference_pos)
         if gate is None:
             if not self.gate_wait_logged:
                 self._log("No gate available → holding on apron")
@@ -301,15 +468,69 @@ class SingleAircraftTurnaround:
         self.plane.assigned_gate = gate
         self.position = self.ground_ops.gate_positions[gate]
         self.trail.append(self.position.copy())
-        self.service_time = random.randint(*SERVICE_TIME_RANGE)
-        self.service_end_time = self.sim_time + self.service_time
-        self.state = "at_gate"
-        self.info_window.add_line(f">>> PARKED AT GATE {gate + 1} <<<")
-        self.info_window.add_line(f"Service time: {self.service_time}s (until t={self.service_end_time:.1f}s)")
-        self.feed.gate_event(f"{self.plane.id} parked at Gate {gate + 1}")
+        # Begin taxi timer from runway to gate before service starts
+        taxi_duration = self._sample_taxi_to_gate_duration(reference_pos, gate)
+        self.taxi_to_gate_end_time = self.sim_time + taxi_duration
+        self.state = "taxi_to_gate"
+        self.info_window.add_line(f">>> GATE {gate + 1} ASSIGNED <<<")
+        self.info_window.add_line(f"Taxiing from runway to gate: {taxi_duration:.1f}s (ETA t={self.taxi_to_gate_end_time:.1f}s)")
+        self.feed.status_update(f"{self.plane.id} taxiing to Gate {gate + 1} (ETA {taxi_duration:.1f}s, arrival t={self.taxi_to_gate_end_time:.1f}s)")
         self._log(
-            f"Parked at Gate {gate + 1}. Service time {self.service_time}s (until t={self.service_end_time:.1f})"
+            f"Gate {gate + 1} assigned. Taxi to gate {taxi_duration:.1f}s (ETA t={self.taxi_to_gate_end_time:.1f})"
         )
+        return self.position
+
+    def _vacate_runway(self):
+        """Short buffer after rollout before runway is freed."""
+        if self.vacate_end_time is None:
+            # Fallback: move straight to gate assignment
+            self.state = "gate_assignment"
+            return self.position
+
+        if self.sim_time >= self.vacate_end_time:
+            # Runway frees via timer check at top of step; ensure it's free now
+            if self.ground_ops.runway_busy:
+                self.ground_ops.release_runway()
+                # Don't announce runway free here - it's already been announced by timer
+            self.state = "gate_assignment"
+            return self.position
+
+        # Still vacating; keep runway busy timer intact
+        return self.position
+
+    def _sample_taxi_to_gate_duration(self, start_position: np.ndarray, gate_index: int) -> float:
+        """Generate a taxi duration using a distance-aware random distribution."""
+        gate_pos = self.ground_ops.gate_positions[gate_index]
+        distance = float(np.linalg.norm(gate_pos - start_position))
+        mean_time = max(30.0, 25.0 + distance / 12.0)  # (~5 m/s baseline with buffer)
+        sigma = max(5.0, 0.2 * mean_time)
+        return max(20.0, random.normalvariate(mean_time, sigma))
+
+    def _taxi_from_runway_to_gate(self):
+        """Taxi animation/timer from runway to assigned gate before service."""
+        if self.taxi_to_gate_end_time is None or self.gate_index is None:
+            self.state = "gate_assignment"
+            return self.position
+
+        if self.sim_time >= self.taxi_to_gate_end_time:
+            self.position = self.ground_ops.gate_positions[self.gate_index]
+            self.trail.append(self.position.copy())
+            # Emergency aircraft need longer service time
+            time_range = EMERGENCY_SERVICE_TIME_RANGE if self.is_emergency else SERVICE_TIME_RANGE
+            self.service_time = random.randint(*time_range)
+            self.service_end_time = self.sim_time + self.service_time
+            self.state = "at_gate"
+            self.runway_exit_position = None
+            self.info_window.add_line(f">>> PARKED AT GATE {self.gate_index + 1} <<<")
+            self.info_window.add_line(f"Service time: {self.service_time}s (until t={self.service_end_time:.1f}s)")
+            self.feed.gate_event(f"{self.plane.id} parked at Gate {self.gate_index + 1}")
+            self._log(
+                f"Parked at Gate {self.gate_index + 1}. Service time {self.service_time}s (until t={self.service_end_time:.1f})"
+            )
+            return self.position
+
+        # Still taxiing; hold position reference at runway or simple interp
+        self.position = self.ground_ops.gate_positions[self.gate_index]
         return self.position
 
     def _service_at_gate(self):
@@ -320,7 +541,7 @@ class SingleAircraftTurnaround:
             self.ground_ops.release_gate(self.gate_index)
             self.info_window.add_line(f"Service COMPLETE - beginning taxi to runway")
             self.info_window.add_line(f"Taxi time: {taxi_time:.1f}s (threshold at t={self.taxi_end_time:.1f}s)")
-            self.feed.status_update(f"{self.plane.id} taxiing to runway from Gate {self.gate_index + 1}")
+            self.feed.status_update(f"{self.plane.id} taxiing to runway from Gate {self.gate_index + 1} (ETA {taxi_time:.1f}s, arrival t={self.taxi_end_time:.1f}s)")
             self._log(
                 f"Service complete. Taxiing to runway (ETA {taxi_time:.1f}s, spawn at threshold t={self.taxi_end_time:.1f})"
             )
@@ -361,19 +582,36 @@ class SingleAircraftTurnaround:
                 self._log("Runway occupied → holding short")
                 self.runway_hold_depart_logged = True
             return self.position
+        self.runway_hold_depart_logged = False
+
+        # Check for inbound arrivals before starting a takeoff roll
+        takeoff_run_time = self.ground_ops.estimate_takeoff_runway_time(self.plane)
+        if self.ground_ops.has_arrival_conflict(self.sim_time, takeoff_run_time):
+            if not self.arrival_conflict_logged:
+                next_eta = self.ground_ops.get_next_arrival_eta(self.sim_time)
+                wait = max(0.0, (next_eta or self.sim_time) - self.sim_time)
+                self.info_window.add_line(
+                    f"Arrival priority — waiting {wait:.1f}s before takeoff clearance"
+                )
+                self.feed.status_update(f"{self.plane.id} holding for arrival separation")
+                self._log(f"Arrival inbound soon; holding short (ETA {wait:.1f}s)")
+                self.arrival_conflict_logged = True
+            return self.position
+        self.arrival_conflict_logged = False
 
         # Runway free -> start departure sim and block runway for takeoff roll
-        self.departure_sim = DepartureSimulator(self.departure_route, self.plane, verbose=False)
-        takeoff_run_time = max(self.departure_sim.ground_roll_data["t"][-1], 5.0) + 5.0
-        self.ground_ops.mark_runway_busy(self.plane, takeoff_run_time, self.sim_time)
+        self.departure_sim = DepartureSimulator(self.departure_route, self.plane, verbose=False, wind_model=self.wind_model)
+        actual_run_time = max(self.departure_sim.ground_roll_data["t"][-1], 5.0) + 5.0
+        block_time = max(actual_run_time, takeoff_run_time)
+        self.ground_ops.mark_runway_busy(self.plane, block_time, self.sim_time)
         self.state = "departure"
         self.takeoff_runway_released = False
         self.info_window.add_line(">>> CLEARED FOR TAKEOFF <<<")
-        self.info_window.add_line(f"Runway blocked for {takeoff_run_time:.1f}s")
+        self.info_window.add_line(f"Runway blocked for {block_time:.1f}s")
         self.feed.announce_clearance(f"{self.plane.id} cleared for takeoff")
         self.feed.runway_status(True, f"{self.plane.id} departing")
         self._log(
-            f"Cleared for takeoff. Blocking runway for {takeoff_run_time:.1f}s (release t={self.ground_ops.runway_free_time:.1f})"
+            f"Cleared for takeoff. Blocking runway for {block_time:.1f}s (release t={self.ground_ops.runway_free_time:.1f})"
         )
         return self.position
 
@@ -404,17 +642,19 @@ class SingleAircraftTurnaround:
             self.position = pos.copy()
             self.trail.append(pos.copy())
 
-            # Release runway only once we have transitioned to climb
+            # Release runway only once we have transitioned to climb AND reached safe altitude
+            # Safety buffer: require at least 120m altitude before releasing runway for next operation
             if (
                 not self.takeoff_runway_released
                 and self.departure_sim.phase == "CLIMB"
+                and pos[2] >= 120.0  # Altitude safety buffer
                 and self.ground_ops.runway_busy
             ):
                 self.ground_ops.release_runway()
-                self.info_window.add_line(">>> AIRBORNE - RUNWAY RELEASED <<<")
+                self.info_window.add_line(f">>> AIRBORNE - RUNWAY RELEASED (alt={pos[2]:.1f}m) <<<")
                 self.feed.runway_status(False, f"{self.plane.id} airborne")
                 self.feed.status_update(f"{self.plane.id} taking off")
-                self._log("Runway freed — aircraft is airborne")
+                self._log(f"Runway freed — aircraft is airborne at {pos[2]:.1f}m")
                 self.takeoff_runway_released = True
             return self.position
         except StopIteration:
@@ -433,69 +673,401 @@ class SingleAircraftTurnaround:
     def state_label(self) -> str:
         labels = {
             "arrival": "Arrival",
+            "vacating_runway": "Vacating runway",
             "gate_assignment": "Taxi to gate",
+            "taxi_to_gate": "Taxi to gate",
             "at_gate": "At gate (service)",
             "taxi_runway": "Taxi to runway",
             "runway_hold": "Holding short",
             "departure": "Departure",
             "complete": "Complete",
         }
-        return labels.get(self.state, self.state)
+        label = labels.get(self.state, self.state)
+        if self.state == "arrival" and self.arrival_hold_active:
+            label = "Arrival (HOLD)"
+        if self.is_emergency:
+            label = f"EMERGENCY | {label}"
+        return label
+
+
+class EmergencyArrivalSimulator(ArrivalSimulator):
+    """
+    Arrival simulator variant that can enter a shallow holding pattern by
+    oscillating between two waypoints at a constant altitude. Used during
+    emergency scenarios to keep non-priority aircraft safely away from the runway.
+    """
+
+    def __init__(self, route, plane, verbose=True, wind_model: Optional[WindModel] = None, heavy_brake: bool = False):
+        super().__init__(route, plane, verbose=verbose, wind_model=wind_model)
+        self.hold_active = False
+        self.hold_state = "FORWARD"  # FORWARD = towards next WP, BACKWARD = to previous
+        self.heavy_brake = heavy_brake
+        self.hold_initialized = False
+        self.hold_altitude = None
+        self.hold_turn_dir = 1
+        self.hold_radius = 300.0  # meters - will be dynamically adjusted
+        self.estimated_hold_time = 60.0  # default estimate
+
+    def set_hold(self, active: bool, estimated_hold_time: float = 60.0):
+        if self.hold_active == active:
+            return
+        self.hold_active = active
+        if active:
+            # Calculate radius so one circle takes roughly the estimated hold time
+            # Circle circumference = 2π×R, time for one circle = circumference / speed
+            # R = (speed × time) / (2π)
+            holding_speed = CRUISE_SPEED  # ~85 m/s
+            self.hold_radius = max(300.0, (holding_speed * estimated_hold_time) / (2 * math.pi))
+            self.estimated_hold_time = estimated_hold_time
+        if not active:
+            self.hold_state = "FORWARD"
+            self.hold_initialized = False
+            self.hold_altitude = None
+
+    def _start_rollout(self):
+        """Standard landing rollout for emergency scenario."""
+        rollout_dyn = FlightDynamics(self.plane)
+        rollout_dyn.reset_state()
+        # Use standard reverse thrust
+        T_rev = 50000.0
+        rollout_dyn.ground_roll_landing(dt=ARRIVAL_DT, V_touchdown=self.V, T_reverse=T_rev)
+        self.rollout_points = []
+        self.rollout_speeds = []
+        for entry in rollout_dyn.telemetry():
+            x_offset = min(entry["x"], RUNWAY_LENGTH - 20)
+            self.rollout_points.append(np.array([RUNWAY_THRESHOLD[0] + x_offset, 0.0, 0.0]))
+            self.rollout_speeds.append(entry.get("V", 0.0))
+            if x_offset >= RUNWAY_LENGTH - 20:
+                break
+        if not self.rollout_points:
+            self.rollout_points.append(RUNWAY_THRESHOLD.copy())
+            self.rollout_speeds = [0.0]
+        # Initialize rollout speed tracking
+        self.current_rollout_speed = self.rollout_speeds[0] if self.rollout_speeds else 0.0
+
+    def __next__(self):
+        if self.finished:
+            raise StopIteration
+
+        if self.landed:
+            if self.rollout_index < len(self.rollout_points):
+                pos = self.rollout_points[self.rollout_index]
+                if self.rollout_index < len(self.rollout_speeds):
+                    self.current_rollout_speed = self.rollout_speeds[self.rollout_index]
+                self.rollout_index += 1
+                return pos
+            self.finished = True
+            raise StopIteration
+
+        if self.segment >= len(self.wps) - 1:
+            self.finished = True
+            raise StopIteration
+
+        # Wind update
+        if self.external_wind:
+            self.wind_vector = self.wind.current()
+        else:
+            self.wind_vector = self.wind.update(ARRIVAL_DT)
+        wind_vec = self.wind_vector
+
+        # HOLDING LOOP
+        if self.hold_active:
+            if not self.hold_initialized:
+                self.hold_altitude = self.pos[2]
+                self.hold_initialized = True
+                self.hold_turn_dir = 1 if random.random() < 0.5 else -1
+            target_speed = CRUISE_SPEED  # ~85 m/s
+            speed_err = target_speed - self.V
+            throttle_setting = clamp(0.3 + V_THROTTLE_GAIN * speed_err / target_speed, 0.0, 1.0)
+            thrust = self.plane.compute_thrust(self.V) * throttle_setting
+            drag = self.plane.compute_drag(self.V, self.gamma)
+            dVdt = (thrust - drag - self.plane.mass * 9.81 * math.sin(self.gamma)) / self.plane.mass
+            # Clamp speed to cruise speed range (don't exceed ~90 m/s during hold)
+            self.V = clamp(self.V + dVdt * ARRIVAL_DT, 60.0, CRUISE_SPEED + 5.0)
+
+            # Circular holding pattern at constant altitude
+            turn_rate = self.V / self.hold_radius
+            self.psi += self.hold_turn_dir * turn_rate * ARRIVAL_DT
+            # Normalize heading to [-pi, pi]
+            self.psi = math.atan2(math.sin(self.psi), math.cos(self.psi))
+            self.gamma = 0.0
+
+            # Update position in horizontal plane with wind, maintain constant altitude
+            air_dx = self.V * math.cos(self.psi) * ARRIVAL_DT
+            air_dy = self.V * math.sin(self.psi) * ARRIVAL_DT
+            self.pos[0] += air_dx + wind_vec[0] * ARRIVAL_DT
+            self.pos[1] += air_dy + wind_vec[1] * ARRIVAL_DT
+            # Maintain constant altitude - no vertical wind effect during hold
+            self.pos[2] = self.hold_altitude
+
+            self.current_time += ARRIVAL_DT
+            self.time_hist.append(self.current_time)
+            self.speed_hist.append(self.V)
+            return self.pos.copy()
+        else:
+            self.hold_initialized = False
+            self.hold_altitude = None
+
+        # NORMAL ARRIVAL (uses original speed management)
+        target = np.array(self.wps[self.segment + 1], dtype=float)
+
+        vec = target - self.pos
+        seg_vec = target - self.seg_start
+        horiz = math.hypot(vec[0], vec[1])
+        dist = math.sqrt(horiz**2 + vec[2]**2)
+
+        if np.dot(vec, seg_vec) <= 0:
+            self.segment += 1
+            self.seg_start = self.pos.copy()
+            if self.segment >= len(self.wps) - 1:
+                self.landed = True
+                self._start_rollout()
+                return self.pos
+            target = np.array(self.wps[self.segment + 1], dtype=float)
+            vec = target - self.pos
+            horiz = math.hypot(vec[0], vec[1])
+            dist = math.sqrt(horiz**2 + vec[2]**2)
+
+        if dist < 5.0:
+            self.pos = target.copy()
+            if self.segment == len(self.wps) - 2:
+                self.landed = True
+                self._start_rollout()
+            else:
+                self.segment += 1
+                self.seg_start = target.copy()
+            return self.pos
+
+        if self.segment >= len(self.wps) - 3:
+            target_speed = FINAL_SPEED
+        elif self.segment >= len(self.wps) - 4:
+            target_speed = APPROACH_SPEED
+        else:
+            target_speed = CRUISE_SPEED
+
+        target_psi = math.atan2(vec[1], vec[0])
+        target_gamma = math.atan2(vec[2], horiz if horiz > 1e-3 else 1e-3)
+
+        psi_err = math.atan2(math.sin(target_psi - self.psi), math.cos(target_psi - self.psi))
+        phi_cmd = clamp(HEADING_GAIN * psi_err, -MAX_BANK_RAD, MAX_BANK_RAD)
+        self.psi += self.dyn.compute_heading_rate(self.V, phi_cmd) * ARRIVAL_DT
+
+        self.gamma += clamp(GAMMA_GAIN * (target_gamma - self.gamma), -0.05, 0.05)
+
+        speed_err = target_speed - self.V
+        speedbrake_multiplier = 1.0
+        if speed_err < -10.0:
+            throttle_setting = 0.0
+            speedbrake_multiplier = 4.0
+        elif speed_err < -3.0:
+            throttle_setting = 0.0
+            speedbrake_multiplier = 3.5
+        elif speed_err < 0:
+            throttle_setting = clamp(0.02 + 0.1 * speed_err / target_speed, 0.0, 0.08)
+            speedbrake_multiplier = 2.5
+        else:
+            throttle_setting = clamp(0.3 + V_THROTTLE_GAIN * speed_err / target_speed, 0.08, 0.85)
+
+        thrust = self.plane.compute_thrust(self.V) * throttle_setting
+        base_drag = self.plane.compute_drag(self.V, self.gamma)
+        drag = base_drag * speedbrake_multiplier
+        dVdt = (thrust - drag - self.plane.mass * 9.81 * math.sin(self.gamma)) / self.plane.mass
+        self.V = max(60.0, self.V + dVdt * ARRIVAL_DT)
+
+        self.current_time += ARRIVAL_DT
+        self.time_hist.append(self.current_time)
+        self.speed_hist.append(self.V)
+
+        air_dx = self.V * math.cos(self.gamma) * math.cos(self.psi) * ARRIVAL_DT
+        air_dy = self.V * math.cos(self.gamma) * math.sin(self.psi) * ARRIVAL_DT
+        air_dz = self.V * math.sin(self.gamma) * ARRIVAL_DT
+        self.pos[0] += air_dx + wind_vec[0] * ARRIVAL_DT
+        self.pos[1] += air_dy + wind_vec[1] * ARRIVAL_DT
+        self.pos[2] += air_dz + wind_vec[2] * ARRIVAL_DT
+
+        if not self.clearance_given and self.segment == len(self.wps) - 2:
+            self.clearance_given = True
+
+        return self.pos.copy()
 
 
 class MultiAircraftSimulator:
     """Orchestrates multiple turnaround flows with random arrivals."""
 
-    def __init__(self, visual_mode: bool = True):
+    def __init__(
+        self,
+        visual_mode: bool = True,
+        emergency_mode: bool = False,
+        emergency_spawn_chance: float = 1.0 / 10000.0,
+    ):
         self.ground_ops = GroundOperations(runway_length=RUNWAY_LENGTH, num_gates=19)
-        self.feed = TerminalFeed()
+        self.visual_mode = visual_mode
+        self.emergency_mode = emergency_mode
+        self.emergency_spawn_chance = max(0.0, emergency_spawn_chance)
+        self.console_window = ATCConsoleWindow(enabled=visual_mode)
+        self.feed = TerminalFeed(self.console_window)
+        self.wind_model = WindModel()
+        self.wind_vector = np.zeros(3)
         self.actors: list[SingleAircraftTurnaround] = []
         self.global_time = 0.0
         self.next_spawn_time = 0.0
         self.dt = GLOBAL_DT
         self.frame_interval_ms = 100
-        self.visual_mode = visual_mode
-        self._spawn_aircraft(initial=True)
+        self.emergency_actor: Optional[SingleAircraftTurnaround] = None
+
+        if self.emergency_mode:
+            self._spawn_emergency_flight()
+            self.next_spawn_time = float("inf")
+            self.emergency_active = True
+        else:
+            self.emergency_active = False
+            self._spawn_aircraft(initial=True)
 
     def _sample_spawn_interval(self) -> float:
         interval = random.expovariate(1.0 / INTER_ARRIVAL_MEAN)
         return max(MIN_SPAWN_INTERVAL, interval)
 
     def _spawn_aircraft(self, initial: bool = False):
+        if self.emergency_mode or self.emergency_active:
+            return
         if len(self.actors) >= MAX_ACTIVE_AIRCRAFT:
             self.next_spawn_time = self.global_time + self._sample_spawn_interval()
             return
 
-        actor = SingleAircraftTurnaround(self.ground_ops, self.feed, visual_mode=self.visual_mode)
+        actor = SingleAircraftTurnaround(
+            self.ground_ops,
+            self.feed,
+            wind_model=self.wind_model,
+            visual_mode=self.visual_mode,
+            arrival_sim_cls=EmergencyArrivalSimulator,
+            arrival_sim_kwargs={"heavy_brake": False},
+        )
         self.actors.append(actor)
-        # Schedule the next spawn window
         self.next_spawn_time = self.global_time + self._sample_spawn_interval()
-        if initial:
-            pass  # Initial spawn logged in _log_intro
-        else:
+        if not initial:
             self.feed.status_update(
                 f"New arrival: {actor.plane.id} on {actor.arrival_route['name']}"
             )
 
+    def _spawn_emergency_flight(self):
+        emergency_cls = random.choice(FLEET)
+        emergency_plane = emergency_cls(f"{emergency_cls.__name__}-{random.randint(100, 999)}")
+        emerg_route = random.choice(generate_arrival_routes(num_routes=20))
+
+        emergency_actor = SingleAircraftTurnaround(
+            self.ground_ops,
+            self.feed,
+            wind_model=self.wind_model,
+            visual_mode=self.visual_mode,
+            plane=emergency_plane,
+            arrival_route=emerg_route,
+            is_emergency=True,
+            arrival_sim_cls=EmergencyArrivalSimulator,
+            arrival_sim_kwargs={"heavy_brake": True},
+            info_window_enabled=True,
+        )
+
+        self.actors.append(emergency_actor)
+        self.emergency_actor = emergency_actor
+        self.feed.status_update(
+            f"Emergency flight {emergency_plane.id} inbound on {emerg_route['name']}."
+        )
+        self.emergency_active = True
+
+    def _update_emergency_hold_states(self):
+        if not (self.emergency_mode or self.emergency_active):
+            return
+
+        if self.emergency_actor not in self.actors:
+            self.emergency_actor = None
+
+        if self.emergency_actor is None:
+            # No emergency - release all holds
+            for actor in self.actors:
+                if actor.state == "arrival":
+                    actor.set_arrival_hold(False)
+            if not self.emergency_mode:
+                self.emergency_active = False
+            return
+
+        emergency_inbound = self.emergency_actor.state in ("arrival", "vacating_runway")
+        
+        if not emergency_inbound:
+            # Emergency cleared - release all holds
+            for actor in self.actors:
+                if actor.state == "arrival":
+                    actor.set_arrival_hold(False)
+            if not self.emergency_mode:
+                self.emergency_active = False
+            return
+
+        # Emergency is active - hold all normal aircraft
+        # Estimate time for emergency to land and clear runway
+        estimated_emergency_time = 60.0  # default
+        if hasattr(self.emergency_actor, 'arrival_sim'):
+            try:
+                eta = self.emergency_actor.arrival_sim.estimate_time_to_threshold()
+                # Add ~15s for landing rollout and runway vacation
+                estimated_emergency_time = max(30.0, eta + 15.0)
+            except:
+                estimated_emergency_time = 60.0
+        
+        any_normals_holding = False
+        for actor in self.actors:
+            if actor is self.emergency_actor or actor.state != "arrival":
+                continue
+            if hasattr(actor, "set_arrival_hold"):
+                actor.set_arrival_hold(True, estimated_emergency_time)
+            any_normals_holding = True
+
+        # Make sure emergency itself is not holding
+        if self.emergency_actor and hasattr(self.emergency_actor, "set_arrival_hold"):
+            self.emergency_actor.set_arrival_hold(False)
+
     def step(self):
         """Advance global time and step all active aircraft."""
         self.global_time += self.dt
-        if self.global_time >= self.next_spawn_time:
-            self._spawn_aircraft()
+        self.wind_vector = self.wind_model.update(self.dt)
+        # Expose emergency flag for other components
+        self.ground_ops.emergency_active = self.emergency_active
+        if not self.emergency_mode:
+            # Normal aircraft spawning continues regardless of emergency status
+            if self.global_time >= self.next_spawn_time and not self.emergency_active:
+                self._spawn_aircraft()
+            
+            # Emergency spawning logic (separate from normal spawning)
+            if not self.emergency_active:
+                # Only allow emergency spawn if not just cleared
+                # Emergency chance is per second, convert to per-frame probability
+                # dt = 0.1s, so multiply by dt to get per-frame chance
+                chance_this_frame = self.emergency_spawn_chance * self.dt
+                if random.random() < chance_this_frame:
+                    self.feed.status_update("⚠ Emergency detected in airspace")
+                    self._spawn_emergency_flight()
+            elif self.emergency_active and self.emergency_actor is None:
+                # Emergency just cleared - resume normal operations
+                self.emergency_active = False
+                # Schedule next spawn (prevents immediate emergency re-spawn)
+                self.next_spawn_time = self.global_time + self._sample_spawn_interval()
+
+        self._update_emergency_hold_states()
 
         updates = []
         for actor in list(self.actors):
             pos = actor.step(self.global_time)
             updates.append((actor, pos))
             if actor.state == "complete":
-                # Close the aircraft's info window
                 actor.info_window.close()
                 self.actors.remove(actor)
         return updates
 
 
-def run_visual_sim(max_frames: int = 2500, show: bool = True):
-    sim = MultiAircraftSimulator(visual_mode=True)
+def run_visual_sim(max_frames: int = 6000, show: bool = True, emergency_mode: bool = False, emergency_chance: float = 1.0 / 10000.0):
+    sim = MultiAircraftSimulator(
+        visual_mode=True,
+        emergency_mode=emergency_mode,
+        emergency_spawn_chance=emergency_chance,
+    )
 
     fig = plt.figure(figsize=(12, 9))
     ax = fig.add_subplot(111, projection="3d")
@@ -536,9 +1108,10 @@ def run_visual_sim(max_frames: int = 2500, show: bool = True):
     ax.legend(loc="upper left")
     ax.grid(True, alpha=0.25)
     ax.view_init(elev=28, azim=-60)
+    wind_text = fig.text(0.02, 0.95, "", fontsize=11, fontweight="bold", color="darkgreen")
 
     actor_artists = {}
-    actor_paths = {}
+    actor_paths: dict[str, dict] = {}
     cmap = plt.colormaps.get_cmap("tab10")
 
     def init():
@@ -578,20 +1151,33 @@ def run_visual_sim(max_frames: int = 2500, show: bool = True):
                     "arr": arr_line,
                     "dep": dep_line,
                 }
-                actor_paths[actor_id] = []
+                actor_paths[actor_id] = {"points": [], "drawing": False}
 
             art = actor_artists[actor_id]
             if pos is not None:
-                actor_paths[actor_id].append(pos.copy())
+                should_draw_path = actor.state in ("arrival", "departure", "runway_hold")
+                path_info = actor_paths.get(actor_id, {"points": [], "drawing": False})
+                if should_draw_path:
+                    if not path_info["drawing"] and len(path_info["points"]) > 0:
+                        path_info["points"].append(np.array([np.nan, np.nan, np.nan]))
+                    path_info["drawing"] = True
+                    path_info["points"].append(pos.copy())
+                else:
+                    path_info["drawing"] = False
+                actor_paths[actor_id] = path_info
+
                 art["point"].set_data([pos[0]], [pos[1]])
                 art["point"].set_3d_properties([pos[2]])
                 art["label"].set_position((pos[0], pos[1]))
                 art["label"].set_3d_properties(pos[2] + 25)
                 art["label"].set_text(f"{actor_id}\n{actor.state_label}")
-                path = np.array(actor_paths[actor_id])
-                if len(path) > 0:
+                path = np.array(path_info["points"]) if path_info["points"] else np.empty((0, 3))
+                if path.size > 0:
                     art["trail"].set_data(path[:, 0], path[:, 1])
                     art["trail"].set_3d_properties(path[:, 2])
+                else:
+                    art["trail"].set_data([], [])
+                    art["trail"].set_3d_properties([])
             artists.extend(art.values())
 
         ax.set_title(
@@ -600,6 +1186,13 @@ def run_visual_sim(max_frames: int = 2500, show: bool = True):
             f"Runway: {'BUSY' if sim.ground_ops.runway_busy else 'FREE'}",
             fontsize=13,
             fontweight="bold",
+        )
+        wind_speed = math.hypot(sim.wind_vector[0], sim.wind_vector[1])
+        wind_knots = wind_speed * 1.94384
+        wind_dir = (math.degrees(math.atan2(sim.wind_vector[1], sim.wind_vector[0])) + 360.0) % 360.0
+        wind_text.set_text(
+            f"Wind: {wind_speed:.1f} m/s ({wind_knots:.1f} kt) @ {wind_dir:.0f}° | "
+            f"Vertical {sim.wind_vector[2]:+.2f} m/s"
         )
 
         # No return needed when blit=False
@@ -621,11 +1214,15 @@ def run_visual_sim(max_frames: int = 2500, show: bool = True):
     return fig, ani
 
 
-def run_headless(max_frames: int = 2500):
+def run_headless(max_frames: int = 6000, emergency_mode: bool = False, emergency_chance: float = 1.0 / 2.0):
     """
     Headless run for quick validation (no plotting).
     """
-    sim = MultiAircraftSimulator(visual_mode=False)
+    sim = MultiAircraftSimulator(
+        visual_mode=False,
+        emergency_mode=emergency_mode,
+        emergency_spawn_chance=emergency_chance,
+    )
     for _ in range(max_frames):
         sim.step()
     print("\nHeadless run finished.")
@@ -637,14 +1234,25 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Autonomous single-aircraft turnaround demo")
     parser.add_argument("--headless", action="store_true", help="Run without plotting (fast sanity check)")
     parser.add_argument(
+        "--emergency",
+        action="store_true",
+        help="Run emergency landing scenario with priority handling",
+    )
+    parser.add_argument(
         "--frames",
         type=int,
-        default=2500,
-        help="Maximum animation frames (≈2500 needed for a full arrival → departure cycle)",
+        default=6000,
+        help="Maximum animation frames (6000 frames = 10 minutes of simulation time)",
+    )
+    parser.add_argument(
+        "--emergency-chance",
+        type=float,
+        default=1.0 / 10000.0,
+        help="Chance per second that an emergency pair spawns during normal operations",
     )
     args = parser.parse_args()
 
     if args.headless:
-        run_headless(max_frames=args.frames)
+        run_headless(max_frames=args.frames, emergency_mode=args.emergency, emergency_chance=args.emergency_chance)
     else:
-        run_visual_sim(max_frames=args.frames, show=True)
+        run_visual_sim(max_frames=args.frames, show=True, emergency_mode=args.emergency, emergency_chance=args.emergency_chance)

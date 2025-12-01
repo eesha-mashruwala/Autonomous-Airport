@@ -13,8 +13,91 @@ Uses numerical integration to solve ODEs for aircraft motion.
 
 import numpy as np
 import math
-from typing import List, Dict, Optional
+import random
+from typing import List, Dict, Optional, Tuple
 from aircraft import Plane
+
+
+def _wrap_angle(angle: float) -> float:
+    """Normalize angle to [0, 2π)."""
+    return angle % (2 * math.pi)
+
+
+def _angle_difference(target: float, current: float) -> float:
+    """Shortest signed angular difference."""
+    return math.atan2(math.sin(target - current), math.cos(target - current))
+
+
+class WindModel:
+    """
+    Simple stochastic wind field for airborne phases.
+
+    Produces a slowly varying horizontal wind vector with occasional small
+    adjustments in speed and direction plus light gust noise.
+    """
+
+    def __init__(
+        self,
+        min_speed: float = 0.0,
+        max_speed: float = 11.0,
+        change_interval: Tuple[float, float] = (25.0, 60.0),
+        max_dir_step_deg: float = 8.0,
+        max_speed_step: float = 2.0,
+        smoothing: float = 6.0,
+        gust_sigma: float = 0.5,
+        vertical_sigma: float = 0.15,
+    ):
+        self.min_speed = min_speed
+        self.max_speed = max_speed
+        self.change_interval = change_interval
+        self.max_dir_step = math.radians(max_dir_step_deg)
+        self.max_speed_step = max_speed_step
+        self.smoothing = max(1.0, smoothing)
+        self.gust_sigma = gust_sigma
+        self.vertical_sigma = vertical_sigma
+
+        self.direction = random.uniform(0.0, 2 * math.pi)
+        self.speed = random.uniform(self.min_speed, self.max_speed)
+        self.target_direction = self.direction
+        self.target_speed = self.speed
+
+        self.time_since_change = 0.0
+        self.next_change = random.uniform(*self.change_interval)
+        self.vector = np.zeros(3)
+
+    def update(self, dt: float) -> np.ndarray:
+        """Advance the wind state and return the current wind vector (m/s)."""
+        self.time_since_change += dt
+        if self.time_since_change >= self.next_change:
+            self.time_since_change = 0.0
+            self.next_change = random.uniform(*self.change_interval)
+            dir_delta = random.uniform(-self.max_dir_step, self.max_dir_step)
+            self.target_direction = _wrap_angle(self.direction + dir_delta)
+            speed_delta = random.uniform(-self.max_speed_step, self.max_speed_step)
+            self.target_speed = min(
+                self.max_speed, max(self.min_speed, self.speed + speed_delta)
+            )
+
+        blend = min(1.0, dt / self.smoothing)
+        dir_error = _angle_difference(self.target_direction, self.direction)
+        self.direction = _wrap_angle(self.direction + dir_error * blend)
+        self.speed += (self.target_speed - self.speed) * blend
+
+        # Small continuous jitter to avoid perfectly smooth flow
+        jitter_dir = math.radians(random.uniform(-0.2, 0.2))
+        self.direction = _wrap_angle(self.direction + jitter_dir * dt)
+        gust = random.gauss(0.0, self.gust_sigma)
+        effective_speed = max(0.0, self.speed + gust)
+
+        vx = effective_speed * math.cos(self.direction)
+        vy = effective_speed * math.sin(self.direction)
+        vz = random.gauss(0.0, self.vertical_sigma)
+        self.vector = np.array([vx, vy, vz], dtype=float)
+        return self.vector.copy()
+
+    def current(self) -> np.ndarray:
+        """Return the current wind vector without advancing the model."""
+        return self.vector.copy()
 
 
 class FlightDynamics:

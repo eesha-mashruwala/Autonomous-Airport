@@ -12,13 +12,14 @@ import math
 import random
 import json
 from datetime import datetime
+from typing import Optional
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import animation
 
 from departure_routes import generate_departure_routes, AIRSPACE_RADIUS, RUNWAY_THRESHOLD, RUNWAY_END
 from aircraft import EmbraerE170, AirbusA220, Dash8_400, ATR72_600
-from flight_dynamics import FlightDynamics
+from flight_dynamics import FlightDynamics, WindModel
 
 # Animation timestep
 ANIMATION_DT = 0.1
@@ -41,7 +42,7 @@ class DepartureSimulator:
     Uses realistic flight dynamics ODEs for takeoff and climb.
     """
 
-    def __init__(self, route, plane, verbose=True):
+    def __init__(self, route, plane, verbose=True, wind_model: Optional[WindModel] = None):
         self.route = route
         self.plane = plane
         self.wps = route["waypoints"]
@@ -53,6 +54,9 @@ class DepartureSimulator:
         
         # Initialize flight dynamics with proper ODE simulation
         self.dyn = FlightDynamics(plane)
+        self.external_wind = wind_model is not None
+        self.wind = wind_model if wind_model is not None else WindModel()
+        self.wind_vector = self.wind.current() if self.external_wind else np.zeros(3)
         
         # Run ground roll simulation using flight_dynamics
         if self.verbose:
@@ -186,6 +190,10 @@ class DepartureSimulator:
 
         # =================== PHASE 2: CLIMB ===================
         if self.phase == "CLIMB":
+            if self.external_wind:
+                self.wind_vector = self.wind.current()
+            else:
+                self.wind_vector = self.wind.update(ANIMATION_DT)
             # Boundary check - exit when reaching airspace limit
             if np.hypot(self.pos[0], self.pos[1]) >= AIRSPACE_RADIUS:
                 if self.verbose:
@@ -199,9 +207,12 @@ class DepartureSimulator:
                 if self.dyn.gamma > 0.01:
                     self.dyn.gamma -= 0.01  # Gradually level off
                 
-                self.pos[0] += self.dyn.V * math.cos(self.dyn.gamma) * math.cos(self.dyn.psi) * ANIMATION_DT
-                self.pos[1] += self.dyn.V * math.cos(self.dyn.gamma) * math.sin(self.dyn.psi) * ANIMATION_DT
-                self.pos[2] += self.dyn.V * math.sin(self.dyn.gamma) * ANIMATION_DT
+                air_dx = self.dyn.V * math.cos(self.dyn.gamma) * math.cos(self.dyn.psi) * ANIMATION_DT
+                air_dy = self.dyn.V * math.cos(self.dyn.gamma) * math.sin(self.dyn.psi) * ANIMATION_DT
+                air_dz = self.dyn.V * math.sin(self.dyn.gamma) * ANIMATION_DT
+                self.pos[0] += air_dx + self.wind_vector[0] * ANIMATION_DT
+                self.pos[1] += air_dy + self.wind_vector[1] * ANIMATION_DT
+                self.pos[2] += air_dz + self.wind_vector[2] * ANIMATION_DT
                 
                 # Record state
                 current_time = self.time_hist[-1] + ANIMATION_DT if self.time_hist else 0.0
@@ -302,10 +313,13 @@ class DepartureSimulator:
             dVdt = self.dyn.compute_airspeed_derivative(self.dyn.V, self.dyn.gamma, thrust)
             self.dyn.V = max(50.0, self.dyn.V + dVdt * ANIMATION_DT)
 
-            # Update position using flight dynamics (continuous integration, no snapping)
-            self.pos[0] += self.dyn.V * math.cos(self.dyn.gamma) * math.cos(self.dyn.psi) * ANIMATION_DT
-            self.pos[1] += self.dyn.V * math.cos(self.dyn.gamma) * math.sin(self.dyn.psi) * ANIMATION_DT
-            self.pos[2] += self.dyn.V * math.sin(self.dyn.gamma) * ANIMATION_DT
+            # Update position using flight dynamics plus wind drift
+            air_dx = self.dyn.V * math.cos(self.dyn.gamma) * math.cos(self.dyn.psi) * ANIMATION_DT
+            air_dy = self.dyn.V * math.cos(self.dyn.gamma) * math.sin(self.dyn.psi) * ANIMATION_DT
+            air_dz = self.dyn.V * math.sin(self.dyn.gamma) * ANIMATION_DT
+            self.pos[0] += air_dx + self.wind_vector[0] * ANIMATION_DT
+            self.pos[1] += air_dy + self.wind_vector[1] * ANIMATION_DT
+            self.pos[2] += air_dz + self.wind_vector[2] * ANIMATION_DT
 
             # Record state
             current_time = self.time_hist[-1] + ANIMATION_DT if self.time_hist else 0.0

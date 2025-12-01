@@ -13,6 +13,8 @@ import random
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import animation
+from typing import Optional
+from typing import Optional
 
 from arrival_routes import (
     generate_arrival_routes,
@@ -21,7 +23,7 @@ from arrival_routes import (
     AIRSPACE_RADIUS,
 )
 from aircraft import EmbraerE170, AirbusA220, Dash8_400, ATR72_600
-from flight_dynamics import FlightDynamics
+from flight_dynamics import FlightDynamics, WindModel
 
 # ---------------------- SIMULATION PARAMETERS ------------------------------
 DT = 0.2                 # s timestep for live animation
@@ -41,7 +43,7 @@ def clamp(val, lo, hi):
 class ArrivalSimulator:
     """Iterator providing live aircraft positions as it flies the route."""
 
-    def __init__(self, route, plane, verbose=True):
+    def __init__(self, route, plane, verbose=True, wind_model: Optional[WindModel] = None):
         self.route = route
         self.plane = plane
         self.dyn = FlightDynamics(plane)
@@ -60,11 +62,46 @@ class ArrivalSimulator:
         self.rollout_index = 0
         self.finished = False
         self.verbose = verbose
+        self.external_wind = wind_model is not None
+        self.wind = wind_model if wind_model is not None else WindModel()
+        self.wind_vector = self.wind.current() if self.external_wind else np.zeros(3)
+        self.rollout_speeds: list[float] = []
+        self.current_rollout_speed: float = 0.0
         
         # Track speed and time for plotting
         self.time_hist = []
         self.speed_hist = []
         self.current_time = 0.0
+
+    def estimate_time_to_threshold(self) -> float:
+        """
+        Approximate time (s) to reach the runway threshold from current state.
+        Uses remaining waypoint distances with target speeds for each leg.
+        """
+        if self.landed or self.finished:
+            return 0.0
+
+        remaining_points = [self.pos.copy()]
+        remaining_points.extend(self.wps[self.segment + 1 :])
+
+        est_time = 0.0
+        for idx in range(len(remaining_points) - 1):
+            start = remaining_points[idx]
+            end = remaining_points[idx + 1]
+            dist = np.linalg.norm(end - start)
+
+            seg_index = self.segment + idx
+            if seg_index >= len(self.wps) - 3:
+                target_speed = FINAL_SPEED
+            elif seg_index >= len(self.wps) - 4:
+                target_speed = APPROACH_SPEED
+            else:
+                target_speed = CRUISE_SPEED
+
+            speed = max(55.0, target_speed)
+            est_time += dist / speed
+
+        return est_time
         
         # Track speed and time for plotting
         self.time_hist = []
@@ -81,6 +118,8 @@ class ArrivalSimulator:
         if self.landed:
             if self.rollout_index < len(self.rollout_points):
                 pos = self.rollout_points[self.rollout_index]
+                if self.rollout_index < len(self.rollout_speeds):
+                    self.current_rollout_speed = self.rollout_speeds[self.rollout_index]
                 self.rollout_index += 1
                 return pos
             self.finished = True
@@ -133,6 +172,14 @@ class ArrivalSimulator:
                 return self.pos
             break
 
+        wind_vec = np.zeros(3)
+        if not self.landed:
+            if self.external_wind:
+                self.wind_vector = self.wind.current()
+            else:
+                self.wind_vector = self.wind.update(DT)
+            wind_vec = self.wind_vector
+
         target_psi = math.atan2(vec[1], vec[0])
         target_gamma = math.atan2(vec[2], horiz if horiz > 1e-3 else 1e-3)
 
@@ -178,9 +225,13 @@ class ArrivalSimulator:
         self.time_hist.append(self.current_time)
         self.speed_hist.append(self.V)
 
-        self.pos[0] += self.V * math.cos(self.gamma) * math.cos(self.psi) * DT
-        self.pos[1] += self.V * math.cos(self.gamma) * math.sin(self.psi) * DT
-        self.pos[2] += self.V * math.sin(self.gamma) * DT
+        air_dx = self.V * math.cos(self.gamma) * math.cos(self.psi) * DT
+        air_dy = self.V * math.cos(self.gamma) * math.sin(self.psi) * DT
+        air_dz = self.V * math.sin(self.gamma) * DT
+
+        self.pos[0] += air_dx + wind_vec[0] * DT
+        self.pos[1] += air_dy + wind_vec[1] * DT
+        self.pos[2] += air_dz + wind_vec[2] * DT
 
         # Live tracker output
         if self.verbose:
@@ -205,13 +256,16 @@ class ArrivalSimulator:
         # Use actual approach speed at touchdown, not the hardcoded FINAL_SPEED
         rollout_dyn.ground_roll_landing(dt=DT, V_touchdown=self.V, T_reverse=50000.0)
         self.rollout_points = []
+        self.rollout_speeds = []
         for entry in rollout_dyn.telemetry():
             x_offset = entry["x"]
             self.rollout_points.append(np.array([RUNWAY_THRESHOLD[0] + x_offset, 0.0, 0.0]))
+            self.rollout_speeds.append(entry.get("V", 0.0))
             if self.verbose:
                 print(f"Rollout: x={x_offset:.1f} m, V={entry['V']:.1f} m/s")
         if not self.rollout_points:
             self.rollout_points.append(RUNWAY_THRESHOLD.copy())
+            self.rollout_speeds = [0.0]
         if self.verbose:
             print("Rollout complete. Holding position for inspection.")
 

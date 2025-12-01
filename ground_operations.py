@@ -99,6 +99,10 @@ class GroundOperations:
         # Landing clearance tracking - maps plane to clearance status
         self.landing_clearances = {}  # {plane: {'cleared': bool, 'time': float}}
 
+        # Track inbound arrival ETAs and cached takeoff durations
+        self.inbound_arrivals: Dict[Plane, Dict[str, float]] = {}
+        self.takeoff_time_cache: Dict[str, float] = {}
+
         # Additional features
         # Taxi time from gate to runway (per gate)
         # Taxi time from runway to gate (per gate)
@@ -141,6 +145,73 @@ class GroundOperations:
         """
         self.runway_busy = False
         self.current_runway_plane = None
+        self.runway_free_time = 0.0
+
+    # ------ ARRIVAL / DEPARTURE CONFLICT MANAGEMENT ------------------------
+
+    def update_arrival_eta(self, plane: Plane, eta_to_threshold: float, current_time: float):
+        """
+        Register or refresh the estimated arrival time to the runway threshold.
+        """
+        if eta_to_threshold is None:
+            return
+        self.inbound_arrivals[plane] = {
+            "eta": current_time + eta_to_threshold,
+            "updated": current_time,
+        }
+
+    def clear_arrival_eta(self, plane: Plane):
+        """Remove a plane from inbound tracking (used after landing)."""
+        if plane in self.inbound_arrivals:
+            del self.inbound_arrivals[plane]
+
+    def _next_arrival_eta(self, current_time: float) -> Optional[float]:
+        """Return soonest arrival ETA (absolute time) and prune stale entries."""
+        stale_cutoff = current_time - 180.0
+        for plane, data in list(self.inbound_arrivals.items()):
+            if data["eta"] < current_time - 10.0 or data["updated"] < stale_cutoff:
+                del self.inbound_arrivals[plane]
+        if not self.inbound_arrivals:
+            return None
+        return min(data["eta"] for data in self.inbound_arrivals.values())
+
+    def has_arrival_conflict(self, current_time: float, required_window: float, buffer: float = 5.0) -> bool:
+        """
+        Determine if an arrival will reach the threshold before a departure can
+        finish its runway use.
+        """
+        next_eta = self._next_arrival_eta(current_time)
+        if next_eta is None:
+            return False
+        return next_eta <= current_time + required_window + buffer
+
+    def get_next_arrival_eta(self, current_time: float) -> Optional[float]:
+        """Public helper to expose the soonest inbound ETA for logging/UI."""
+        return self._next_arrival_eta(current_time)
+
+    def estimate_takeoff_runway_time(self, plane: Plane) -> float:
+        """
+        Estimate how long this aircraft type will occupy the runway for takeoff.
+        Uses a cached ground-roll simulation plus a buffer to clear the surface.
+        """
+        plane_type = getattr(plane, "plane_type", plane.__class__.__name__)
+        if plane_type in self.takeoff_time_cache:
+            return self.takeoff_time_cache[plane_type]
+
+        # Default if dynamics fail for any reason
+        estimated_time = 35.0
+        try:
+            from flight_dynamics import FlightDynamics  # local import to avoid cycle
+
+            dyn = FlightDynamics(plane)
+            result = dyn.ground_roll_takeoff(dt=0.05, Vr=70.0, max_time=120.0)
+            roll_time = result.get("time", estimated_time)
+            estimated_time = max(roll_time, 5.0) + 7.0  # add buffer to clear runway
+        except Exception:
+            estimated_time = 35.0
+
+        self.takeoff_time_cache[plane_type] = estimated_time
+        return estimated_time
 
     # ------ LANDING CLEARANCE LOGIC (ATC) ----------------------------------------------
     
@@ -254,17 +325,32 @@ class GroundOperations:
             return self.gates[gate_index] is None
         return False
     
-    def allocate_gate(self, plane):
+    def allocate_gate(self, plane, reference_position: Optional[np.ndarray] = None) -> Optional[int]:
         """
-        Assign a plane to the first available gate.
-        Returns the gate index, or None if full.
+        Assign a plane to the nearest available gate.
+        
+        Parameters
+        ----------
+        plane : Plane
+            Aircraft requesting a gate
+        reference_position : np.ndarray, optional
+            Position to measure distance from (defaults to runway threshold)
         """
-        for i, gate in enumerate(self.gates):
-            if gate is None:
-                self.gates[i] = plane
-                plane.assigned_gate = i  # optional but very useful
-                return i
-        return None  # no available gates
+        free_gates = self.get_free_gates()
+        if not free_gates:
+            return None
+
+        if reference_position is None:
+            reference_position = RUNWAY_THRESHOLD
+
+        ref = np.array(reference_position, dtype=float)
+        nearest_gate = min(
+            free_gates,
+            key=lambda idx: np.linalg.norm(self.gate_positions[idx] - ref)
+        )
+        self.gates[nearest_gate] = plane
+        plane.assigned_gate = nearest_gate
+        return nearest_gate
 
     def release_gate(self, gate_index: int):
         """
