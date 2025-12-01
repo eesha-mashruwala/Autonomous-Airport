@@ -100,7 +100,7 @@ class TerminalFeed:
 
     def runway_status(self, busy: bool, reason: str):
         state = "BUSY" if busy else "FREE"
-        print(f"ATC | Runway {state} → {reason}", flush=True)
+        print(f"ATC | Runway {state} -> {reason}", flush=True)
 
     def gate_event(self, text: str):
         print(f"GATE | {text}", flush=True)
@@ -271,7 +271,7 @@ class SingleAircraftTurnaround:
                 else:
                     # Holding pattern - shouldn't happen with proper sequencing
                     if not self.runway_hold_logged:
-                        self.info_window.add_line("Runway occupied → HOLDING on final approach")
+                        self.info_window.add_line("Runway occupied -> HOLDING on final approach")
                         self.feed.announce_clearance(f"{self.plane.id} holding - runway occupied")
                         self.runway_hold_logged = True
             
@@ -293,7 +293,7 @@ class SingleAircraftTurnaround:
         gate = self.ground_ops.allocate_gate(self.plane)
         if gate is None:
             if not self.gate_wait_logged:
-                self._log("No gate available → holding on apron")
+                self._log("No gate available -> holding on apron")
                 self.gate_wait_logged = True
             return self.position
 
@@ -358,7 +358,7 @@ class SingleAircraftTurnaround:
             if not self.runway_hold_depart_logged:
                 self.info_window.add_line("Runway OCCUPIED - holding short")
                 self.feed.status_update(f"{self.plane.id} holding - runway busy")
-                self._log("Runway occupied → holding short")
+                self._log("Runway occupied -> holding short")
                 self.runway_hold_depart_logged = True
             return self.position
 
