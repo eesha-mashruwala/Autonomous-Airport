@@ -69,7 +69,7 @@ class DepartureSimulator:
         self.ground_roll_data = self.dyn.get_history()
         
         if self.verbose:
-            print(f"✓ Takeoff complete: V={takeoff_result['V_rot']:.1f} m/s, "
+            print(f"Takeoff complete: V={takeoff_result['V_rot']:.1f} m/s, "
                   f"distance={takeoff_result['distance']:.1f} m, time={takeoff_result['time']:.1f} s")
         
         # Set up initial heading based on route
@@ -132,7 +132,7 @@ class DepartureSimulator:
                 # Check if we reached rotation speed - IMMEDIATELY transition to climb
                 if self.V >= VR * 0.99 and not self.climb_started:
                     if self.verbose:
-                        print(f"\n✓ Rotation! V={self.V:.1f} m/s at x={self.pos[0]:.0f}m, transitioning to CLIMB")
+                        print(f"\nRotation! V={self.V:.1f} m/s at x={self.pos[0]:.0f}m, transitioning to CLIMB")
                     self.phase = "CLIMB"
                     self.climb_started = True
                     
@@ -186,7 +186,7 @@ class DepartureSimulator:
                 self.seg_start = self.pos.copy()
                 self.dyn.gamma = math.radians(8)
                 if self.verbose:
-                    print(f"\n✓ Ground roll complete, transitioning to CLIMB from segment {self.segment}")
+                    print(f"\nGround roll complete, transitioning to CLIMB from segment {self.segment}")
 
         # =================== PHASE 2: CLIMB ===================
         if self.phase == "CLIMB":
@@ -197,7 +197,7 @@ class DepartureSimulator:
             # Boundary check - exit when reaching airspace limit
             if np.hypot(self.pos[0], self.pos[1]) >= AIRSPACE_RADIUS:
                 if self.verbose:
-                    print(f"✓ Reached airspace boundary at {np.hypot(self.pos[0], self.pos[1]):.0f}m")
+                    print(f"Reached airspace boundary at {np.hypot(self.pos[0], self.pos[1]):.0f}m")
                 self.finished = True
                 raise StopIteration
             
@@ -255,7 +255,7 @@ class DepartureSimulator:
                 # Check if reached waypoint (proximity test)
                 if dist_3d < 50.0:
                     if self.verbose:
-                        print(f"✓ Reached waypoint {self.segment+1}/{len(self.wps)-1}: "
+                        print(f"Reached waypoint {self.segment+1}/{len(self.wps)-1}: "
                               f"pos=({target[0]:.0f}, {target[1]:.0f}, {target[2]:.0f})")
                     self.segment += 1
                     self.seg_start = target.copy()
@@ -478,7 +478,7 @@ if __name__ == "__main__":
     json_filename = f"departure_trajectory_{plane.id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     with open(json_filename, 'w') as f:
         json.dump(simulator.trajectory_data, f, indent=2)
-    print(f"\n✓ Trajectory data saved to: {json_filename}")
+    print(f"\nTrajectory data saved to: {json_filename}")
 
     # Plot performance after simulation completes
     print("\n" + "="*60)
