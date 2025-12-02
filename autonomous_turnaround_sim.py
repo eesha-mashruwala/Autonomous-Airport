@@ -73,6 +73,7 @@ class AircraftInfoWindow:
         self.enabled = enabled
         self.lines = []
         self.max_lines = 50
+        self.update_counter = 0
         
         if self.enabled:
             self.fig = plt.figure(figsize=(10, 7))
@@ -96,9 +97,11 @@ class AircraftInfoWindow:
             self.lines.pop(0)
         
         if self.enabled:
-            self.text.set_text('\n'.join(self.lines))
-            self.fig.canvas.draw_idle()
-            self.fig.canvas.flush_events()
+            self.update_counter += 1
+            if self.update_counter % 10 == 0:
+                self.text.set_text('\n'.join(self.lines))
+                self.fig.canvas.draw_idle()
+            # self.fig.canvas.flush_events()
 
     def close(self):
         """Close the window."""
@@ -1204,7 +1207,7 @@ def run_visual_sim(max_frames: int = 6000, show: bool = True, emergency_mode: bo
         frames=max_frames,
         init_func=init,
         interval=sim.frame_interval_ms,
-        blit=False,  # Must be False for 3D plots to update properly
+        blit=True,  # Must be False for 3D plots to update properly
         repeat=False,
     )
 
