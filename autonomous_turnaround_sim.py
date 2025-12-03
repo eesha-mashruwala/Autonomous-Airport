@@ -57,12 +57,15 @@ FLEET = [EmbraerE170, AirbusA220, Dash8_400, ATR72_600]
 # Temporary forced taxi duration (debugging convenience)
 FORCED_TAXI_TIME = 10.0
 FINAL_APPROACH_TARGET = 65.0
-INTER_ARRIVAL_MEAN = 105.0  # seconds between new arrivals (mean)
-MIN_SPAWN_INTERVAL = 45.0   # seconds, safety lower bound
+INTER_ARRIVAL_MEAN = 60.0  # seconds between new arrivals (mean)
+MIN_SPAWN_INTERVAL = 20.0   # seconds, safety lower bound
 MAX_ACTIVE_AIRCRAFT = 4
 GLOBAL_DT = DEPARTURE_DT  # base time step for orchestration
 HOLD_ALTITUDE_THRESHOLD = 200.0  # meters
 LANDING_CLEAR_BUFFER = 10.0  # seconds runway occupancy buffer for arrival ahead
+ARRIVAL_RUNWAY_CLEARANCE_TIME = 25.0  # seconds to clear runway after touchdown
+EMERGENCY_MIN_LEAD_TIME = 5.0  # seconds runway must be free before emergency arrives
+EMERGENCY_CLEARANCE_BUFFER = 15.0  # extra time emergency needs after threshold crossing
 
 
 class AircraftInfoWindow:
@@ -75,20 +78,26 @@ class AircraftInfoWindow:
         self.max_lines = 50
         self.update_counter = 0
         
-        if self.enabled:
-            self.fig = plt.figure(figsize=(10, 7))
-            self.fig.canvas.manager.set_window_title(f"Aircraft {plane_id} - Telemetry")
-            self.ax = self.fig.add_subplot(111)
-            self.ax.axis('off')
-            self.text = self.ax.text(0.05, 0.95, "", transform=self.ax.transAxes,
-                                     fontfamily='monospace', fontsize=9,
-                                     verticalalignment='top', wrap=True)
-            plt.ion()
-            self.fig.show()
-        else:
-            self.fig = None
-            self.ax = None
-            self.text = None
+        # Commented out to prevent opening telemetry windows per aircraft
+        # if self.enabled:
+        #     self.fig = plt.figure(figsize=(10, 7))
+        #     self.fig.canvas.manager.set_window_title(f"Aircraft {plane_id} - Telemetry")
+        #     self.ax = self.fig.add_subplot(111)
+        #     self.ax.axis('off')
+        #     self.text = self.ax.text(0.05, 0.95, "", transform=self.ax.transAxes,
+        #                              fontfamily='monospace', fontsize=9,
+        #                              verticalalignment='top', wrap=True)
+        #     plt.ion()
+        #     self.fig.show()
+        # else:
+        #     self.fig = None
+        #     self.ax = None
+        #     self.text = None
+        
+        # Always set to None to prevent window creation
+        self.fig = None
+        self.ax = None
+        self.text = None
 
     def add_line(self, line: str):
         """Add a new line to the info window."""
@@ -96,17 +105,20 @@ class AircraftInfoWindow:
         if len(self.lines) > self.max_lines:
             self.lines.pop(0)
         
-        if self.enabled:
-            self.update_counter += 1
-            if self.update_counter % 10 == 0:
-                self.text.set_text('\n'.join(self.lines))
-                self.fig.canvas.draw_idle()
-            # self.fig.canvas.flush_events()
+        # Commented out to prevent updating telemetry windows
+        # if self.enabled:
+        #     self.update_counter += 1
+        #     if self.update_counter % 10 == 0:
+        #         self.text.set_text('\n'.join(self.lines))
+        #         self.fig.canvas.draw_idle()
+        #     # self.fig.canvas.flush_events()
 
     def close(self):
         """Close the window."""
-        if self.enabled and self.fig is not None:
-            plt.close(self.fig)
+        # Commented out to prevent closing telemetry windows (none are created)
+        # if self.enabled and self.fig is not None:
+        #     plt.close(self.fig)
+        pass
 
 
 class ATCConsoleWindow:
@@ -906,7 +918,8 @@ class MultiAircraftSimulator:
         self.ground_ops = GroundOperations(runway_length=RUNWAY_LENGTH, num_gates=19)
         self.visual_mode = visual_mode
         self.emergency_mode = emergency_mode
-        self.emergency_spawn_chance = max(0.0, emergency_spawn_chance)
+        # Treat chance as probability per aircraft spawn, clamp into [0, 1]
+        self.emergency_spawn_chance = max(0.0, min(1.0, emergency_spawn_chance))
         self.console_window = ATCConsoleWindow(enabled=visual_mode)
         self.feed = TerminalFeed(self.console_window)
         self.wind_model = WindModel()
@@ -925,6 +938,14 @@ class MultiAircraftSimulator:
         else:
             self.emergency_active = False
             self._spawn_aircraft(initial=True)
+
+    def _plane_to_actor(self, plane) -> Optional["SingleAircraftTurnaround"]:
+        if plane is None:
+            return None
+        for actor in self.actors:
+            if actor.plane is plane:
+                return actor
+        return None
 
     def _sample_spawn_interval(self) -> float:
         interval = random.expovariate(1.0 / INTER_ARRIVAL_MEAN)
@@ -978,50 +999,73 @@ class MultiAircraftSimulator:
         self.emergency_active = True
 
     def _update_emergency_hold_states(self):
-        if not (self.emergency_mode or self.emergency_active):
-            return
-
+        emergency_required = self.emergency_mode or self.emergency_active
         if self.emergency_actor not in self.actors:
             self.emergency_actor = None
 
-        if self.emergency_actor is None:
-            # No emergency - release all holds
-            for actor in self.actors:
-                if actor.state == "arrival":
-                    actor.set_arrival_hold(False)
-            if not self.emergency_mode:
-                self.emergency_active = False
-            return
+        emergency_inbound = False
+        emergency_eta = None
+        estimated_emergency_time = 60.0
+        if self.emergency_actor is not None:
+            emergency_inbound = self.emergency_actor.state in ("arrival", "vacating_runway")
+            if hasattr(self.emergency_actor, "arrival_sim"):
+                try:
+                    emergency_eta = max(0.0, self.emergency_actor.arrival_sim.estimate_time_to_threshold())
+                except Exception:
+                    emergency_eta = None
+            if emergency_eta is not None:
+                estimated_emergency_time = max(30.0, emergency_eta + EMERGENCY_CLEARANCE_BUFFER)
 
-        emergency_inbound = self.emergency_actor.state in ("arrival", "vacating_runway")
-        
-        if not emergency_inbound:
-            # Emergency cleared - release all holds
-            for actor in self.actors:
-                if actor.state == "arrival":
-                    actor.set_arrival_hold(False)
-            if not self.emergency_mode:
-                self.emergency_active = False
-            return
+        if emergency_required and not emergency_inbound:
+            self.emergency_active = False
+            self.emergency_actor = None
 
-        # Emergency is active - hold all normal aircraft
-        # Estimate time for emergency to land and clear runway
-        estimated_emergency_time = 60.0  # default
-        if hasattr(self.emergency_actor, 'arrival_sim'):
-            try:
-                eta = self.emergency_actor.arrival_sim.estimate_time_to_threshold()
-                # Add ~15s for landing rollout and runway vacation
-                estimated_emergency_time = max(30.0, eta + 15.0)
-            except:
-                estimated_emergency_time = 60.0
-        
-        any_normals_holding = False
+        runway_departure_actor = None
+        runway_departure_hold_time = 0.0
+        if self.ground_ops.runway_busy:
+            owner = self._plane_to_actor(self.ground_ops.current_runway_plane)
+            if owner is not None and owner.state == "departure":
+                runway_departure_actor = owner
+                runway_departure_hold_time = max(
+                    5.0,
+                    (self.ground_ops.runway_free_time - self.global_time) + LANDING_CLEAR_BUFFER,
+                )
+
         for actor in self.actors:
-            if actor is self.emergency_actor or actor.state != "arrival":
+            if actor.state != "arrival":
                 continue
-            if hasattr(actor, "set_arrival_hold"):
-                actor.set_arrival_hold(True, estimated_emergency_time)
-            any_normals_holding = True
+            if actor is self.emergency_actor:
+                actor.set_arrival_hold(False)
+                continue
+
+            hold_durations = []
+
+            if emergency_inbound and self.emergency_actor is not None:
+                allow_continue = False
+                normal_eta = None
+                if hasattr(actor, "arrival_sim"):
+                    try:
+                        normal_eta = max(0.0, actor.arrival_sim.estimate_time_to_threshold())
+                    except Exception:
+                        normal_eta = None
+
+                if normal_eta is not None and emergency_eta is not None:
+                    clearance_time = normal_eta + ARRIVAL_RUNWAY_CLEARANCE_TIME
+                    if clearance_time + EMERGENCY_MIN_LEAD_TIME <= emergency_eta:
+                        allow_continue = True
+                if not allow_continue:
+                    hold_durations.append(estimated_emergency_time)
+
+            if runway_departure_actor is not None:
+                hold_durations.append(runway_departure_hold_time)
+
+            if hold_durations:
+                actor.set_arrival_hold(True, max(hold_durations))
+            else:
+                actor.set_arrival_hold(False)
+
+        if self.emergency_actor is None and not self.emergency_mode:
+            self.emergency_active = False
 
         # Make sure emergency itself is not holding
         if self.emergency_actor and hasattr(self.emergency_actor, "set_arrival_hold"):
@@ -1034,24 +1078,16 @@ class MultiAircraftSimulator:
         # Expose emergency flag for other components
         self.ground_ops.emergency_active = self.emergency_active
         if not self.emergency_mode:
-            # Normal aircraft spawning continues regardless of emergency status
             if self.global_time >= self.next_spawn_time and not self.emergency_active:
-                self._spawn_aircraft()
-            
-            # Emergency spawning logic (separate from normal spawning)
-            if not self.emergency_active:
-                # Only allow emergency spawn if not just cleared
-                # Emergency chance is per second, convert to per-frame probability
-                # dt = 0.1s, so multiply by dt to get per-frame chance
-                chance_this_frame = self.emergency_spawn_chance * self.dt
-                if random.random() < chance_this_frame:
+                # Evaluate emergency probability once per scheduled spawn event
+                spawn_emergency = random.random() < self.emergency_spawn_chance
+                if spawn_emergency:
                     self.feed.status_update("⚠ Emergency detected in airspace")
                     self._spawn_emergency_flight()
-            elif self.emergency_active and self.emergency_actor is None:
-                # Emergency just cleared - resume normal operations
-                self.emergency_active = False
-                # Schedule next spawn (prevents immediate emergency re-spawn)
-                self.next_spawn_time = self.global_time + self._sample_spawn_interval()
+                    # Sample a fresh interval so we don't immediately spawn again
+                    self.next_spawn_time = self.global_time + self._sample_spawn_interval()
+                else:
+                    self._spawn_aircraft()
 
         self._update_emergency_hold_states()
 
@@ -1250,8 +1286,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--emergency-chance",
         type=float,
-        default=1.0 / 10000.0,
-        help="Chance per second that an emergency pair spawns during normal operations",
+        default=1.0 / 20.0,
+        help="Per-aircraft probability that the next spawn will be an emergency",
     )
     args = parser.parse_args()
 
