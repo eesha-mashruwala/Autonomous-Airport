@@ -40,6 +40,7 @@ FLEET = [EmbraerE170, AirbusA220, Dash8_400, ATR72_600]
 # Temporary forced taxi duration (debugging convenience)
 FORCED_TAXI_TIME = 10.0
 FINAL_APPROACH_TARGET = 65.0
+ARRIVAL_RUNWAY_CLEARANCE_TIME = 25.0
 
 
 class TerminalFeed:
@@ -188,13 +189,22 @@ class SingleAircraftTurnaround:
 
             # Check if aircraft is on final approach (last 2 segments before runway)
             on_final_approach = self.arrival_sim.segment >= len(self.arrival_sim.wps) - 2
+
+            landing_window = None
+            if hasattr(self.arrival_sim, "estimate_time_to_threshold"):
+                try:
+                    eta = max(0.0, self.arrival_sim.estimate_time_to_threshold())
+                    landing_window = max(ARRIVAL_RUNWAY_CLEARANCE_TIME, eta + ARRIVAL_RUNWAY_CLEARANCE_TIME)
+                except Exception:
+                    landing_window = None
             
             # Request landing clearance when on final approach
             if on_final_approach and not self.landing_busy_marked:
                 clearance_granted = self.ground_ops.request_landing_clearance(
                     self.plane, 
                     self.sim_time, 
-                    on_final_approach=True
+                    on_final_approach=True,
+                    landing_window=landing_window,
                 )
                 
                 if clearance_granted:

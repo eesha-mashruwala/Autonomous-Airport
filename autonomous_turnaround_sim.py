@@ -419,6 +419,16 @@ class SingleAircraftTurnaround:
 
             # Check if aircraft is on final approach (last 2 segments before runway)
             on_final_approach = self.arrival_sim.segment >= len(self.arrival_sim.wps) - 2
+
+            landing_window = None
+            if eta_to_threshold is not None:
+                try:
+                    landing_window = max(
+                        ARRIVAL_RUNWAY_CLEARANCE_TIME,
+                        eta_to_threshold + ARRIVAL_RUNWAY_CLEARANCE_TIME,
+                    )
+                except Exception:
+                    landing_window = None
             
             # Request landing clearance when on final approach
             if on_final_approach and not self.landing_busy_marked:
@@ -426,6 +436,7 @@ class SingleAircraftTurnaround:
                     self.plane,
                     self.sim_time,
                     on_final_approach=True,
+                    landing_window=landing_window,
                 )
                 
                 if clearance_granted:
@@ -720,8 +731,14 @@ class EmergencyArrivalSimulator(ArrivalSimulator):
         self.hold_initialized = False
         self.hold_altitude = None
         self.hold_turn_dir = 1
-        self.hold_radius = 300.0  # meters - will be dynamically adjusted
+        self.hold_radius = 750.0  # meters - will be dynamically adjusted
         self.estimated_hold_time = 60.0  # default estimate
+        self.hold_center: Optional[np.ndarray] = None
+        self.hold_angle = 0.0
+        self.hold_angular_rate = 0.0
+        self.hold_target_speed = CRUISE_SPEED
+        self.hold_elapsed = 0.0
+        self.hold_loop_duration = 0.0
 
     def set_hold(self, active: bool, estimated_hold_time: float = 60.0):
         if self.hold_active == active:
@@ -731,13 +748,31 @@ class EmergencyArrivalSimulator(ArrivalSimulator):
             # Calculate radius so one circle takes roughly the estimated hold time
             # Circle circumference = 2π×R, time for one circle = circumference / speed
             # R = (speed × time) / (2π)
-            holding_speed = CRUISE_SPEED  # ~85 m/s
-            self.hold_radius = max(300.0, (holding_speed * estimated_hold_time) / (2 * math.pi))
-            self.estimated_hold_time = estimated_hold_time
+            self.hold_target_speed = CRUISE_SPEED
+            self.estimated_hold_time = max(15.0, estimated_hold_time)
+            self.hold_radius = max(300.0, (self.hold_target_speed * self.estimated_hold_time) / (2 * math.pi))
+            self.hold_turn_dir = 1 if random.random() < 0.5 else -1
+            offset = np.array([
+                -math.sin(self.psi),
+                math.cos(self.psi),
+                0.0,
+            ])
+            self.hold_center = self.pos + (self.hold_turn_dir * self.hold_radius) * offset
+            rel = self.pos - self.hold_center
+            self.hold_angle = math.atan2(rel[1], rel[0])
+            self.hold_angular_rate = self.hold_target_speed / self.hold_radius
+            self.hold_elapsed = 0.0
+            self.hold_loop_duration = (2 * math.pi * self.hold_radius) / self.hold_target_speed
+            self.hold_initialized = True
+            self.hold_altitude = self.pos[2]
         if not active:
             self.hold_state = "FORWARD"
             self.hold_initialized = False
             self.hold_altitude = None
+            self.hold_center = None
+            self.hold_angle = 0.0
+            self.hold_angular_rate = 0.0
+            self.hold_elapsed = 0.0
 
     def _start_rollout(self):
         """Standard landing rollout for emergency scenario."""
@@ -787,33 +822,21 @@ class EmergencyArrivalSimulator(ArrivalSimulator):
 
         # HOLDING LOOP
         if self.hold_active:
-            if not self.hold_initialized:
-                self.hold_altitude = self.pos[2]
-                self.hold_initialized = True
-                self.hold_turn_dir = 1 if random.random() < 0.5 else -1
-            target_speed = CRUISE_SPEED  # ~85 m/s
-            speed_err = target_speed - self.V
-            throttle_setting = clamp(0.3 + V_THROTTLE_GAIN * speed_err / target_speed, 0.0, 1.0)
-            thrust = self.plane.compute_thrust(self.V) * throttle_setting
-            drag = self.plane.compute_drag(self.V, self.gamma)
-            dVdt = (thrust - drag - self.plane.mass * 9.81 * math.sin(self.gamma)) / self.plane.mass
-            # Clamp speed to cruise speed range (don't exceed ~90 m/s during hold)
-            self.V = clamp(self.V + dVdt * ARRIVAL_DT, 60.0, CRUISE_SPEED + 5.0)
+            if not self.hold_initialized or self.hold_center is None:
+                self.set_hold(True, self.estimated_hold_time)
 
-            # Circular holding pattern at constant altitude
-            turn_rate = self.V / self.hold_radius
-            self.psi += self.hold_turn_dir * turn_rate * ARRIVAL_DT
-            # Normalize heading to [-pi, pi]
-            self.psi = math.atan2(math.sin(self.psi), math.cos(self.psi))
-            self.gamma = 0.0
-
-            # Update position in horizontal plane with wind, maintain constant altitude
-            air_dx = self.V * math.cos(self.psi) * ARRIVAL_DT
-            air_dy = self.V * math.sin(self.psi) * ARRIVAL_DT
-            self.pos[0] += air_dx + wind_vec[0] * ARRIVAL_DT
-            self.pos[1] += air_dy + wind_vec[1] * ARRIVAL_DT
-            # Maintain constant altitude - no vertical wind effect during hold
+            self.hold_elapsed += ARRIVAL_DT
+            theta_dot = self.hold_turn_dir * self.hold_angular_rate
+            self.hold_angle = (self.hold_angle + theta_dot * ARRIVAL_DT) % (2 * math.pi)
+            self.pos[0] = self.hold_center[0] + self.hold_radius * math.cos(self.hold_angle)
+            self.pos[1] = self.hold_center[1] + self.hold_radius * math.sin(self.hold_angle)
             self.pos[2] = self.hold_altitude
+
+            vx = -self.hold_radius * math.sin(self.hold_angle) * theta_dot
+            vy = self.hold_radius * math.cos(self.hold_angle) * theta_dot
+            self.psi = math.atan2(vy, vx)
+            self.gamma = 0.0
+            self.V = self.hold_target_speed
 
             self.current_time += ARRIVAL_DT
             self.time_hist.append(self.current_time)
@@ -822,6 +845,7 @@ class EmergencyArrivalSimulator(ArrivalSimulator):
         else:
             self.hold_initialized = False
             self.hold_altitude = None
+            self.hold_center = None
 
         # NORMAL ARRIVAL (uses original speed management)
         target = np.array(self.wps[self.segment + 1], dtype=float)
@@ -1286,7 +1310,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--emergency-chance",
         type=float,
-        default=1.0 / 20.0,
+        default=1.0 / 15.0,
         help="Per-aircraft probability that the next spawn will be an emergency",
     )
     args = parser.parse_args()

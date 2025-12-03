@@ -215,7 +215,13 @@ class GroundOperations:
 
     # ------ LANDING CLEARANCE LOGIC (ATC) ----------------------------------------------
     
-    def request_landing_clearance(self, plane, current_time: float, on_final_approach: bool = False) -> bool:
+    def request_landing_clearance(
+        self,
+        plane,
+        current_time: float,
+        on_final_approach: bool = False,
+        landing_window: Optional[float] = None,
+    ) -> bool:
         """
         Request landing clearance for an aircraft.
         
@@ -245,8 +251,9 @@ class GroundOperations:
         if on_final_approach:
             if self.is_runway_available(current_time):
                 # Mark runway busy for the landing operation
-                # Estimate 60 seconds for final approach + touchdown + rollout + vacate
-                landing_duration = 60.0
+                # Use provided estimate if available, otherwise fall back to default window
+                landing_duration = landing_window if landing_window is not None else 60.0
+                landing_duration = max(30.0, landing_duration)
                 self.mark_runway_busy(plane, landing_duration, current_time)
                 
                 # Grant clearance
