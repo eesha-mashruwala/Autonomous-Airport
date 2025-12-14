@@ -172,7 +172,7 @@ class DepartureSimulator:
                     self.segment = best_segment
                     self.seg_start = self.pos.copy()
                     if self.verbose:
-                        print(f"  → Targeting waypoint {self.segment + 1} for smoothest climb (turn angle: {math.degrees(min_turn_angle):.1f}°)")
+                        print(f" Targeting waypoint {self.segment + 1} for smoothest climb (turn angle: {math.degrees(min_turn_angle):.1f}°)")
                     
                     # Don't return here - continue immediately to climb phase
                 else:

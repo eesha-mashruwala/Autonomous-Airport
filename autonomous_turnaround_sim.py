@@ -21,6 +21,9 @@ import numpy as np
 import matplotlib
 matplotlib.use('TkAgg')  # Force interactive backend
 import matplotlib.pyplot as plt
+import sys
+sys.stdout.reconfigure(encoding='utf-8')
+
 from matplotlib import animation
 
 from arrival_live_sim import (
@@ -183,7 +186,7 @@ class TerminalFeed:
 
     def runway_status(self, busy: bool, reason: str):
         state = "BUSY" if busy else "FREE"
-        self._emit("ATC", f"Runway {state} → {reason}")
+        self._emit("ATC", f"Runway {state} , {reason}")
 
     def gate_event(self, text: str):
         self._emit("GATE", text)
@@ -224,7 +227,7 @@ class SingleAircraftTurnaround:
         self.arrival_sim = arrival_sim_cls(
             self.arrival_route,
             self.plane,
-            verbose=False,
+            verbose=True,
             wind_model=self.wind_model,
             **(arrival_sim_kwargs or {}),
         )
@@ -444,12 +447,14 @@ class SingleAircraftTurnaround:
                     self.info_window.add_line(">>> ATC: CLEARED TO LAND <<<")
                     self.feed.announce_clearance(f"{self.plane.id} cleared to land")
                     self.feed.runway_status(True, f"{self.plane.id} landing")
+
+                    self._log("ATC: Cleared to land")
                     # Update arrival_sim clearance flag for display
                     self.arrival_sim.clearance_given = True
                 else:
                     # Holding pattern - shouldn't happen with proper sequencing
                     if not self.runway_hold_logged:
-                        self.info_window.add_line("Runway occupied → HOLDING on final approach")
+                        self.info_window.add_line("Runway occupied , HOLDING on final approach")
                         self.feed.announce_clearance(f"{self.plane.id} holding - runway occupied")
                         self.runway_hold_logged = True
             
@@ -486,7 +491,7 @@ class SingleAircraftTurnaround:
         gate = self.ground_ops.allocate_gate(self.plane, reference_position=reference_pos)
         if gate is None:
             if not self.gate_wait_logged:
-                self._log("No gate available → holding on apron")
+                self._log("No gate available , holding on apron")
                 self.gate_wait_logged = True
             return self.position
 
@@ -605,7 +610,7 @@ class SingleAircraftTurnaround:
             if not self.runway_hold_depart_logged:
                 self.info_window.add_line("Runway OCCUPIED - holding short")
                 self.feed.status_update(f"{self.plane.id} holding - runway busy")
-                self._log("Runway occupied → holding short")
+                self._log("Runway occupied , holding short")
                 self.runway_hold_depart_logged = True
             return self.position
         self.runway_hold_depart_logged = False
@@ -626,7 +631,7 @@ class SingleAircraftTurnaround:
         self.arrival_conflict_logged = False
 
         # Runway free -> start departure sim and block runway for takeoff roll
-        self.departure_sim = DepartureSimulator(self.departure_route, self.plane, verbose=False, wind_model=self.wind_model)
+        self.departure_sim = DepartureSimulator(self.departure_route, self.plane, verbose=True, wind_model=self.wind_model)
         actual_run_time = max(self.departure_sim.ground_roll_data["t"][-1], 5.0) + 5.0
         block_time = max(actual_run_time, takeoff_run_time)
         self.ground_ops.mark_runway_busy(self.plane, block_time, self.sim_time)
@@ -1106,7 +1111,7 @@ class MultiAircraftSimulator:
                 # Evaluate emergency probability once per scheduled spawn event
                 spawn_emergency = random.random() < self.emergency_spawn_chance
                 if spawn_emergency:
-                    self.feed.status_update("⚠ Emergency detected in airspace")
+                    self.feed.status_update("Emergency detected in airspace")
                     self._spawn_emergency_flight()
                     # Sample a fresh interval so we don't immediately spawn again
                     self.next_spawn_time = self.global_time + self._sample_spawn_interval()
