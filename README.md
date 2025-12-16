@@ -349,11 +349,9 @@ Where:
 
 ## Licence
 
-Educational project for UCL Modelling and Simulation coursework.
-
-**Author:** Aryan Patel  
+**Author:** Aryan Patel & Eesha Mashruwala
 **Institution:** University College London  
-**Course:** Year 2, Term 1 - Modelling and Simulation  
+**Course:** MEng Robotics & Artificial Intelligence - Modelling and Simulation  
 **Date:** December 2025
 
 ---
