@@ -320,24 +320,6 @@ Where:
 
 ---
 
-## Key Implementation Details
-
-### British English Usage
-All comments and docstrings use British English:
-- Initialise (not Initialize)
-- Metres (not Meters)
-- Optimise (not Optimize)
-- Colour (not Color)
-- Manoeuvre (not Maneuver)
-
-### Code Quality
-- Comprehensive docstrings for all classes and methods
-- Detailed inline comments for complex algorithms
-- Type hints throughout
-- Consistent naming conventions
-
----
-
 ## Troubleshooting
 
 **Aircraft overshoots runway:**
